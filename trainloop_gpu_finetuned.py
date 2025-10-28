@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 GPU Training Loop with Qwen Fine-Tuning and Grid Accuracy Loss
 
@@ -26,6 +25,8 @@ from revthink_orchestrator import RevThinkOrchestrator, RevThinkCfg
 from feature_registry import FeatureRegistry, apply_operator_config
 from feature_extraction import extract_transformation_features, classify_transformation_type
 from grid_accuracy_loss import GridAccuracyLoss, ARCPromptGuidedAgentGPU
+
+
 
 
 def seed_all(seed=42):
@@ -235,34 +236,55 @@ def evaluate(agent, qwen, eval_loader, device, feat_reg, max_batches=None, binar
     return avg_acc, perfect_count, total_samples
 
 
-def make_qwen_finetunable(device="cuda"):
-    """Create Qwen model with fine-tuning enabled (NOT frozen)"""
-    qcfg = QwenCfg(
-        model_name="Qwen/Qwen2.5-1.8B",
-        dtype="float16",
-        temperature=0.0,
-        use_qwen=True
-    )
-    qwen = QwenHybridPrompt(
-        prompt_dim=256,
-        numeric_in_dim=15,
-        fuse="mean",
-        qwen=qcfg
-    ).to(device)
-    return qwen
+def make_qwen_finetunable(device="cuda", model_name=None):
+    """
+    Create Qwen model with fine-tuning enabled (NOT frozen).
+    모델명을 인자로 받아 유연하게 로드하고, 폴백 후보를 순차 시도합니다.
+    """
+    import os
+
+    # 1) 우선순위: CLI 인자 → 환경변수 → 기본값
+    name = model_name or os.getenv("QWEN_MODEL", "Qwen/Qwen1.5-1.8B")
+
+    # 2) 폴백 후보 (존재하는 모델들만 나열)
+    candidates = [
+        name,
+        "Qwen/Qwen1.5-1.8B",
+        "Qwen/Qwen1.5-1.8B-Chat",
+        "Qwen/Qwen2.5-1.5B-Instruct",
+    ]
+
+    last_err = None
+    for cand in candidates:
+        try:
+            qcfg = QwenCfg(
+                model_name=cand,    
+                dtype="float16",
+                temperature=0.0,
+                use_qwen=True,
+                trust_remote_code=True,   
+                use_auth_token=True       
+            )
+            qwen = QwenHybridPrompt(
+                prompt_dim=256,
+                numeric_in_dim=15,
+                fuse="mean",
+                qwen=qcfg
+            ).to(device)
+            print(f"[Qwen] Loaded model: {cand}")
+            return qwen
+        except Exception as e:
+            last_err = e
+            print(f"[Qwen] Failed to load {cand}: {e}")
+
+    raise RuntimeError(f"Failed to load any Qwen model. Last error: {last_err}")
 
 
-def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda"):
+
+def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda", model_name=None):
     """
     Main training loop for GPU with Qwen fine-tuning.
-
-    Args:
-        epochs: Number of training epochs
-        max_batches_per_epoch: Max batches per epoch (None = full dataset)
-        skip_test: Skip evaluation phase
-        device: 'cuda' for GPU, 'cpu' for CPU
     """
-
     print("\n" + "="*70)
     print("GPU TRAINING WITH QWEN FINE-TUNING".center(70))
     print("="*70 + "\n")
@@ -281,28 +303,28 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda"):
     logger.log(f"Validation: Binary Accuracy (strict ARC evaluation)")
     logger.log(f"Output: {output_dir}\n")
 
-    # Load data
+    # ----- 데이터 경로 유연화(선택) -----
+    data_dir = os.getenv("ARC_DATA_DIR", ".")
+    train_path = os.path.join(data_dir, "training.json")
     logger.log("Loading datasets...")
-    train_ds = ARCDataset("training.json", split="train")
-    test_ds = ARCDataset("training.json", split="test")
-    val_ds = ARCDataset("training.json", split="test")  # Use test for validation
+    train_ds = ARCDataset(train_path, split="train")
+    test_ds  = ARCDataset(train_path, split="test")
+    val_ds   = ARCDataset(train_path, split="test")  # test를 검증으로 재사용
 
     train_ld = DataLoader(train_ds, batch_size=1, shuffle=True)
-    val_ld = DataLoader(val_ds, batch_size=1, shuffle=False)
-    test_ld = DataLoader(test_ds, batch_size=1, shuffle=False)
+    val_ld   = DataLoader(val_ds,  batch_size=1, shuffle=False)
+    test_ld  = DataLoader(test_ds, batch_size=1, shuffle=False)
 
     logger.log(f"  Train: {len(train_ds)} samples")
-    logger.log(f"  Val: {len(val_ds)} samples")
-    logger.log(f"  Test: {len(test_ds)} samples\n")
+    logger.log(f"  Val:   {len(val_ds)} samples")
+    logger.log(f"  Test:  {len(test_ds)} samples\n")
 
-    # Create components
+    # ----- Qwen 생성 (모델명 전달) -----
     logger.log("Creating model components...")
-
-    # Create Qwen with fine-tuning enabled
-    qwen = make_qwen_finetunable(device=device)
+    qwen = make_qwen_finetunable(device=device, model_name=model_name)
     logger.log("  ✓ Qwen loaded (TRAINABLE - NOT FROZEN)")
 
-    # Create agent
+    # ----- Agent 생성 -----
     agent = ARCPromptGuidedAgentGPU(
         max_grid_size=30,
         num_colors=10,
@@ -311,22 +333,23 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda"):
     ).to(device)
     logger.log("  ✓ Agent created with grid accuracy loss")
 
-    # Create optimizer with BOTH agent and qwen parameters
+    # ----- Optimizer (에이전트/LM LR 분리) -----
     agent_params = list(agent.parameters())
-    qwen_params = list(qwen.parameters())
-    all_params = agent_params + qwen_params
+    qwen_params  = list(qwen.parameters())
+    total_params = agent_params + qwen_params
 
     logger.log(f"  Agent parameters: {sum(p.numel() for p in agent_params):,}")
-    logger.log(f"  Qwen parameters: {sum(p.numel() for p in qwen_params):,}")
-    logger.log(f"  Total trainable: {sum(p.numel() for p in all_params):,}")
+    logger.log(f"  Qwen parameters:  {sum(p.numel() for p in qwen_params):,}")
+    logger.log(f"  Total trainable:  {sum(p.numel() for p in total_params):,}")
 
-    # Lower learning rate for Qwen fine-tuning (LM is sensitive)
-    optim = torch.optim.Adam(all_params, lr=5e-4)  # Lower than agent-only training
-    logger.log("  ✓ Optimizer created (lr=5e-4 for stability)\n")
+    optim = torch.optim.Adam([
+        {"params": agent_params, "lr": 5e-4},
+        {"params": qwen_params,  "lr": 1e-4},   # LM은 더 낮게
+    ])
+    logger.log("  ✓ Optimizer created (agent lr=5e-4, qwen lr=1e-4)\n")
 
     feat_reg = FeatureRegistry()
 
-    # Training loop
     best_acc = -1
     best_ckpt = os.path.join(output_dir, "agent_best.pt")
     qwen_ckpt = os.path.join(output_dir, "qwen_best.pt")
@@ -337,31 +360,30 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda"):
     for epoch in range(epochs):
         logger.log(f"\n[Epoch {epoch}/{epochs-1}]")
 
-        # Train
         avg_loss = train_epoch(agent, qwen, train_ld, optim, device, feat_reg,
-                              epoch, logger, max_batches_per_epoch)
+                               epoch, logger, max_batches_per_epoch)
         logger.log(f"  Average Loss: {avg_loss:.6f}")
 
-        # Validate
         if not skip_test:
-            val_acc, val_perfect, val_total = evaluate(agent, qwen, val_ld, device, feat_reg,
-                                                        max_batches=None, binary_accuracy=True)
+            val_acc, val_perfect, val_total = evaluate(
+                agent, qwen, val_ld, device, feat_reg,
+                max_batches=None, binary_accuracy=True
+            )
             logger.log(f"  Val Accuracy: {val_acc:.4f} ({val_perfect}/{val_total} grids perfect)")
 
-            # Save best
             if val_acc > best_acc:
                 best_acc = val_acc
                 torch.save(agent.state_dict(), best_ckpt)
-                torch.save(qwen.state_dict(), qwen_ckpt)
+                torch.save(qwen.state_dict(),  qwen_ckpt)
                 logger.log(f"  ✓ Best checkpoint saved!")
 
-    # Final test evaluation
     logger.log("\n" + "="*70)
     logger.log("FINAL TEST EVALUATION (Strict Binary Accuracy)")
     logger.log("="*70)
 
-    test_acc, test_perfect, test_total = evaluate(agent, qwen, test_ld, device, feat_reg,
-                                                  max_batches=None, binary_accuracy=True)
+    test_acc, test_perfect, test_total = evaluate(
+        agent, qwen, test_ld, device, feat_reg, max_batches=None, binary_accuracy=True
+    )
     logger.log(f"\nTest Accuracy (Binary): {test_acc:.4f} ({test_perfect}/{test_total} grids perfect)")
 
     logger.log("\n" + "="*70)
@@ -413,8 +435,17 @@ USAGE:
                        help="Skip evaluation phase")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use: cuda or cpu (default: cuda)")
+    parser.add_argument(
+    "--model_name",
+    type=str,
+    default="Qwen/Qwen1.5-1.8B",   
+    help="HF model id (e.g., Qwen/Qwen1.5-1.8B, Qwen/Qwen1.5-1.8B-Chat, Qwen/Qwen2.5-1.5B-Instruct)"
+)
+
 
     args = parser.parse_args()
+
+# 파일 상단의 argparse 설정 부분에 아래 한 줄 추가
 
     try:
         output_dir, final_acc = main(
