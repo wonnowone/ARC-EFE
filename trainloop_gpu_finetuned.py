@@ -259,12 +259,10 @@ def make_qwen_finetunable(device="cuda", model_name=None):
     for cand in candidates:
         try:
             qcfg = QwenCfg(
-                model_name=cand,    
+                model_name=cand,
                 dtype="float16",
                 temperature=0.0,
-                use_qwen=True,
-                trust_remote_code=True,   
-                use_auth_token=True       
+                use_qwen=True
             )
             qwen = QwenHybridPrompt(
                 prompt_dim=256,
@@ -500,6 +498,7 @@ DESKTOP/CLOUD USAGE:
 
     args = parser.parse_args()
 
+# 파일 상단의 argparse 설정 부분에 아래 한 줄 추가
 
     try:
         output_dir, final_acc = main(
