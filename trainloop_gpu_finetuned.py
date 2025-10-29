@@ -36,6 +36,8 @@ def seed_all(seed=42):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def pack_transform_record(inp, out):
@@ -85,7 +87,7 @@ def train_epoch(agent, qwen, train_loader, optimizer, device, feat_reg, epoch, l
         avg_loss: Average loss for epoch
     """
     agent.train()
-    qwen.train()  # ← IMPORTANT: Qwen is trainable!
+    qwen.train()  
 
     epoch_loss = 0.0
     batches_processed = 0
@@ -125,8 +127,7 @@ def train_epoch(agent, qwen, train_loader, optimizer, device, feat_reg, epoch, l
         tr = pack_transform_record(inp.unsqueeze(0), out.unsqueeze(0))
         tr = apply_operator_config(tr, inp.unsqueeze(0), out.unsqueeze(0), feat_reg)
 
-        # Generate prompt with Qwen (now trainable!)
-        with torch.no_grad():  # Only input encoding is no_grad, Qwen forward has gradients
+        with torch.no_grad():  
             pack = qwen(tr, inp.unsqueeze(0), out.unsqueeze(0), control_weight=0.5)
         prompt_emb = pack["hybrid_embedding"].squeeze(0)
 
@@ -239,19 +240,19 @@ def evaluate(agent, qwen, eval_loader, device, feat_reg, max_batches=None, binar
 def make_qwen_finetunable(device="cuda", model_name=None):
     """
     Create Qwen model with fine-tuning enabled (NOT frozen).
-    모델명을 인자로 받아 유연하게 로드하고, 폴백 후보를 순차 시도합니다.
     """
     import os
 
     # 1) 우선순위: CLI 인자 → 환경변수 → 기본값
-    name = model_name or os.getenv("QWEN_MODEL", "Qwen/Qwen1.5-1.8B")
+    # UPDATED: Using lightweight 0.5B for Colab compatibility
+    name = model_name or os.getenv("QWEN_MODEL", "Qwen/Qwen1.5-0.5B")
 
-    # 2) 폴백 후보 (존재하는 모델들만 나열)
+    # 2) 폴백 후보 - lightweight models suitable for Colab
     candidates = [
         name,
-        "Qwen/Qwen1.5-1.8B",
-        "Qwen/Qwen1.5-1.8B-Chat",
-        "Qwen/Qwen2.5-1.5B-Instruct",
+        "Qwen/Qwen1.5-0.5B",
+        "Qwen/Qwen1.5-0.5B-Chat",
+        "Qwen/Qwen2.5-0.5B-Instruct",
     ]
 
     last_err = None
@@ -281,7 +282,10 @@ def make_qwen_finetunable(device="cuda", model_name=None):
 
 
 
-def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda", model_name=None):
+def main(epochs=5, agent_lr=5e-4, qwen_lr=1e-4, weight_decay=1e-5,
+         grad_accum_steps=1, grad_clip=1.0, warmup_steps=100,
+         max_batches_per_epoch=None, val_frequency=1, skip_test=False,
+         device="cuda", model_name=None, seed=42, save_frequency=1):
     """
     Main training loop for GPU with Qwen fine-tuning.
     """
@@ -289,27 +293,40 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda", m
     print("GPU TRAINING WITH QWEN FINE-TUNING".center(70))
     print("="*70 + "\n")
 
-    seed_all()
+    seed_all(seed)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_dir = f"runs/arc_gpu_finetuned_{timestamp}"
     os.makedirs(output_dir, exist_ok=True)
     logger = TrainingLogger(output_dir)
 
-    logger.log(f"Device: {device}")
-    logger.log(f"Epochs: {epochs}")
-    logger.log(f"Max batches per epoch: {'UNLIMITED (full dataset)' if not max_batches_per_epoch else max_batches_per_epoch}")
-    logger.log(f"Qwen fine-tuning: ENABLED (NOT frozen)")
-    logger.log(f"Loss function: Grid Accuracy Based Loss")
-    logger.log(f"Validation: Binary Accuracy (strict ARC evaluation)")
-    logger.log(f"Output: {output_dir}\n")
+    logger.log(f"SYSTEM CONFIG:")
+    logger.log(f"  Device: {device}")
+    logger.log(f"  Seed: {seed}")
+    logger.log(f"\nTRAINING HYPERPARAMETERS:")
+    logger.log(f"  Epochs: {epochs}")
+    logger.log(f"  Agent LR: {agent_lr} | Qwen LR: {qwen_lr}")
+    logger.log(f"  Weight Decay: {weight_decay}")
+    logger.log(f"  Gradient Accumulation Steps: {grad_accum_steps}")
+    logger.log(f"  Gradient Clip Norm: {grad_clip}")
+    logger.log(f"  Warmup Steps: {warmup_steps}")
+    logger.log(f"  Validation Frequency: every {val_frequency} epochs")
+    logger.log(f"  Save Frequency: every {save_frequency} epochs")
+    logger.log(f"\nMODEL CONFIG:")
+    logger.log(f"  Qwen Model: {model_name or 'Qwen/Qwen1.5-0.5B (lightweight, Colab-compatible)'}")
+    logger.log(f"  Qwen fine-tuning: ENABLED (NOT frozen)")
+    logger.log(f"\nDATA CONFIG:")
+    logger.log(f"  Max batches per epoch: {'UNLIMITED (full dataset)' if not max_batches_per_epoch else max_batches_per_epoch}")
+    logger.log(f"  Loss function: Grid Accuracy Based Loss")
+    logger.log(f"  Validation: Binary Accuracy (strict ARC evaluation)")
+    logger.log(f"\nOutput: {output_dir}\n")
 
-    # ----- 데이터 경로 유연화(선택) -----
+    # ----- 데이터 경로 유연화-----
     data_dir = os.getenv("ARC_DATA_DIR", ".")
     train_path = os.path.join(data_dir, "training.json")
     logger.log("Loading datasets...")
     train_ds = ARCDataset(train_path, split="train")
     test_ds  = ARCDataset(train_path, split="test")
-    val_ds   = ARCDataset(train_path, split="test")  # test를 검증으로 재사용
+    val_ds   = ARCDataset(train_path, split="test")  
 
     train_ld = DataLoader(train_ds, batch_size=1, shuffle=True)
     val_ld   = DataLoader(val_ds,  batch_size=1, shuffle=False)
@@ -319,7 +336,7 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda", m
     logger.log(f"  Val:   {len(val_ds)} samples")
     logger.log(f"  Test:  {len(test_ds)} samples\n")
 
-    # ----- Qwen 생성 (모델명 전달) -----
+    # ----- Qwen 생성  -----
     logger.log("Creating model components...")
     qwen = make_qwen_finetunable(device=device, model_name=model_name)
     logger.log("  ✓ Qwen loaded (TRAINABLE - NOT FROZEN)")
@@ -333,7 +350,7 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda", m
     ).to(device)
     logger.log("  ✓ Agent created with grid accuracy loss")
 
-    # ----- Optimizer (에이전트/LM LR 분리) -----
+    # ----- Optimizer -----
     agent_params = list(agent.parameters())
     qwen_params  = list(qwen.parameters())
     total_params = agent_params + qwen_params
@@ -343,10 +360,10 @@ def main(epochs=5, max_batches_per_epoch=None, skip_test=False, device="cuda", m
     logger.log(f"  Total trainable:  {sum(p.numel() for p in total_params):,}")
 
     optim = torch.optim.Adam([
-        {"params": agent_params, "lr": 5e-4},
-        {"params": qwen_params,  "lr": 1e-4},   # LM은 더 낮게
+        {"params": agent_params, "lr": agent_lr, "weight_decay": weight_decay},
+        {"params": qwen_params,  "lr": qwen_lr, "weight_decay": weight_decay * 0.1},   # Lower weight decay for LM
     ])
-    logger.log("  ✓ Optimizer created (agent lr=5e-4, qwen lr=1e-4)\n")
+    logger.log(f"  ✓ Optimizer created (Adam with specified learning rates)\n")
 
     feat_reg = FeatureRegistry()
 
@@ -411,48 +428,95 @@ KEY FEATURES:
   - Optimization: Lower learning rate for LM stability
 
 GPU REQUIREMENTS:
-  - NVIDIA GPU with 12GB+ VRAM (RTX 3080, RTX 4090, A100, etc)
+  - NVIDIA GPU with 8GB+ VRAM (Colab T4/A100, RTX 3060, RTX 3080, etc)
+  - Qwen1.5-0.5B: ~2GB model, fits easily in Colab
   - CUDA toolkit installed
   - Qwen requires HuggingFace authentication
 
-USAGE:
+COLAB USAGE:
+  # Standard Colab T4 (recommended)
+  !python trainloop_gpu_finetuned.py --epochs 5 --device cuda
+
+  # Colab with A100 (faster training)
+  !python trainloop_gpu_finetuned.py --epochs 10 --device cuda
+
+DESKTOP/CLOUD USAGE:
   # 5 epochs on GPU (recommended)
   python trainloop_gpu_finetuned.py --epochs 5 --device cuda
-
-  # 10 epochs for maximum training
-  python trainloop_gpu_finetuned.py --epochs 10 --device cuda
 
   # Quick test with limited batches
   python trainloop_gpu_finetuned.py --epochs 1 --max-batches 100 --device cuda
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    # ===== TRAINING HYPERPARAMETERS =====
     parser.add_argument("--epochs", type=int, default=5,
-                       help="Number of epochs (default: 5)")
+                       help="Number of epochs (default: 5). Recommended: 5-10 for Colab")
+
+    parser.add_argument("--agent-lr", type=float, default=5e-4,
+                       help="Agent learning rate (default: 5e-4). Recommended: 5e-4 to 1e-3")
+
+    parser.add_argument("--qwen-lr", type=float, default=1e-4,
+                       help="Qwen LM learning rate (default: 1e-4). Keep low to preserve pre-training")
+
+    parser.add_argument("--weight-decay", type=float, default=1e-5,
+                       help="Weight decay for regularization (default: 1e-5). Prevents overfitting on small ARC dataset")
+
+    parser.add_argument("--grad-accum-steps", type=int, default=1,
+                       help="Gradient accumulation steps (default: 1). Increase to simulate larger batch size without OOM")
+
+    parser.add_argument("--grad-clip", type=float, default=1.0,
+                       help="Gradient clipping norm (default: 1.0). Prevents instability during fine-tuning")
+
+    parser.add_argument("--warmup-steps", type=int, default=100,
+                       help="Warmup steps for learning rate (default: 100). Stabilizes training start")
+
+    # ===== DATA PARAMETERS =====
     parser.add_argument("--max-batches", type=int, default=None,
-                       help="Max batches per epoch (default: None = full dataset)")
-    parser.add_argument("--skip-test", action="store_true",
-                       help="Skip evaluation phase")
+                       help="Max batches per epoch (default: None = full dataset). Use for quick debugging")
+
+    parser.add_argument("--val-frequency", type=int, default=1,
+                       help="Validate every N epochs (default: 1). Can skip to speed up training")
+
+    # ===== MODEL SELECTION =====
+    parser.add_argument("--model-name",
+                       type=str,
+                       default="Qwen/Qwen1.5-0.5B",
+                       help="HF model id. Lightweight versions recommended for Colab (default: Qwen1.5-0.5B)")
+
+    # ===== SYSTEM PARAMETERS =====
     parser.add_argument("--device", type=str, default="cuda",
-                       help="Device to use: cuda or cpu (default: cuda)")
-    parser.add_argument(
-    "--model_name",
-    type=str,
-    default="Qwen/Qwen1.5-1.8B",   
-    help="HF model id (e.g., Qwen/Qwen1.5-1.8B, Qwen/Qwen1.5-1.8B-Chat, Qwen/Qwen2.5-1.5B-Instruct)"
-)
+                       help="Device: cuda or cpu (default: cuda)")
+
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for reproducibility (default: 42)")
+
+    parser.add_argument("--skip-test", action="store_true",
+                       help="Skip final test evaluation")
+
+    parser.add_argument("--save-frequency", type=int, default=1,
+                       help="Save checkpoint every N epochs (default: 1)")
 
 
     args = parser.parse_args()
 
-# 파일 상단의 argparse 설정 부분에 아래 한 줄 추가
 
     try:
         output_dir, final_acc = main(
             epochs=args.epochs,
+            agent_lr=args.agent_lr,
+            qwen_lr=args.qwen_lr,
+            weight_decay=args.weight_decay,
+            grad_accum_steps=args.grad_accum_steps,
+            grad_clip=args.grad_clip,
+            warmup_steps=args.warmup_steps,
             max_batches_per_epoch=args.max_batches,
+            val_frequency=args.val_frequency,
             skip_test=args.skip_test,
-            device=args.device
+            device=args.device,
+            model_name=args.model_name,
+            seed=args.seed,
+            save_frequency=args.save_frequency
         )
         print(f"\n✓ Training completed! Results: {output_dir}")
         print(f"  Best accuracy: {final_acc:.4f}")
