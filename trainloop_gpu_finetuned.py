@@ -498,7 +498,6 @@ DESKTOP/CLOUD USAGE:
 
     args = parser.parse_args()
 
-# 파일 상단의 argparse 설정 부분에 아래 한 줄 추가
 
     try:
         output_dir, final_acc = main(
