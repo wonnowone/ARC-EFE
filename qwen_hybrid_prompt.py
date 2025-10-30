@@ -160,6 +160,12 @@ JSON only:
 def _make_qwen_prompt(input_grid: torch.Tensor,
                       output_grid: Optional[torch.Tensor],
                       candidate: str) -> str:
+    # Remove batch dimension if present (grids should be 2D: h x w)
+    if input_grid.dim() == 3:
+        input_grid = input_grid.squeeze(0)
+    if output_grid is not None and output_grid.dim() == 3:
+        output_grid = output_grid.squeeze(0)
+
     in_txt = grid_to_text(input_grid)
     if output_grid is not None:
         out_txt = "OutputGrid:\n" + grid_to_text(output_grid) + "\n\n"
