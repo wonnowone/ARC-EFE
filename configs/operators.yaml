@@ -1,0 +1,18 @@
+operators:
+  - name: vertical_sym_score
+    enabled: true
+    params: {}
+    description: "Calculates vertical symmetry score (0-1, higher = more vertically symmetric)"
+
+  - name: axis_color_runlen
+    enabled: true
+    params:
+      axis: "columns"
+      color: 2
+      agg: "max"
+    description: "Calculates longest consecutive run of a specific color on specified axis"
+
+  - name: hole_fill_ratio
+    enabled: true
+    params: {}
+    description: "Calculates ratio of background (0) pixels in grid"

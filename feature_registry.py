@@ -3,8 +3,12 @@ from typing import Dict, Any
 
 class FeatureRegistry:
     def __init__(self, cfg_path="configs/operators.yaml"):
-        with open(cfg_path,"r") as f:
-            self.cfg = yaml.safe_load(f)
+        try:
+            with open(cfg_path,"r") as f:
+                self.cfg = yaml.safe_load(f)
+        except FileNotFoundError:
+            # Use default config if file not found
+            self.cfg = {"operators": []}
         self.ops = {
             "vertical_sym_score": self.vertical_sym_score,
             "axis_color_runlen": self.axis_color_runlen,
