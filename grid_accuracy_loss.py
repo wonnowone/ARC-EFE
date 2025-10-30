@@ -41,7 +41,7 @@ class GridAccuracyLoss(nn.Module):
                 targets: torch.Tensor,      # [H, W] target grid
                 return_components: bool = False) -> torch.Tensor:
         """
-        Calculate grid accuracy based loss.
+        Calculate grid accuracy based loss using cross-entropy on logits.
 
         Args:
             predictions: [H, W, num_colors] logits from agent
@@ -49,45 +49,42 @@ class GridAccuracyLoss(nn.Module):
             return_components: If True, return (loss, accuracy, perfect)
 
         Returns:
-            loss: Scalar tensor (1 - accuracy)
+            loss: Scalar tensor (cross-entropy loss)
             Or tuple (loss, accuracy, is_perfect) if return_components=True
         """
 
-        # Ensure correct shapes
+        # Compute cross-entropy loss on logits (fully differentiable)
         if predictions.dim() == 3:
-            pred_classes = predictions.argmax(dim=-1)  # [H, W]
+            H, W, num_colors = predictions.shape
+
+            # Flatten spatial dimensions for cross_entropy
+            predictions_flat = predictions.reshape(-1, num_colors)  # [H*W, num_colors]
+            targets_flat = targets.reshape(-1)  # [H*W]
+
+            # Cross-entropy loss (differentiable, proper gradient path)
+            loss = F.cross_entropy(predictions_flat, targets_flat)
+
+            # Compute accuracy for monitoring (detached from gradient graph)
+            if return_components:
+                with torch.no_grad():
+                    pred_classes = predictions_flat.argmax(dim=-1)  # [H*W]
+                    correct_cells = (pred_classes == targets_flat).float()
+                    accuracy = correct_cells.mean()
+                    is_perfect = (correct_cells.sum() == correct_cells.numel())
+                return loss, accuracy.item(), is_perfect.item()
+
+            return loss
         else:
-            pred_classes = predictions
+            # If predictions are already class indices (shouldn't happen)
+            pred_classes = predictions.reshape(-1)
+            targets_flat = targets.reshape(-1)
+            correct_cells = (pred_classes == targets_flat).float()
+            accuracy = correct_cells.mean()
+            loss = 1.0 - accuracy
 
-        # Handle size mismatch (pad smaller outputs)
-        if pred_classes.shape != targets.shape:
-            if pred_classes.shape[0] < targets.shape[0]:
-                pad_h = targets.shape[0] - pred_classes.shape[0]
-                pred_classes = F.pad(pred_classes, (0, 0, 0, pad_h), value=0)
-            if pred_classes.shape[1] < targets.shape[1]:
-                pad_w = targets.shape[1] - pred_classes.shape[1]
-                pred_classes = F.pad(pred_classes, (0, pad_w), value=0)
-
-        # Crop to target size
-        pred_classes = pred_classes[:targets.shape[0], :targets.shape[1]]
-
-        # Calculate per-cell accuracy
-        correct_cells = (pred_classes == targets).float()  # [H, W]
-        accuracy = correct_cells.mean()  # Scalar: [0, 1]
-
-        # Basic loss: 1 - accuracy
-        loss = 1.0 - accuracy
-
-        # Apply focal weighting if enabled
-        if self.use_focal:
-            # Focus on hard samples (low accuracy gets higher weight)
-            focal_weight = (1.0 - accuracy) ** self.focal_gamma
-            loss = loss * focal_weight
-
-        if return_components:
-            is_perfect = (correct_cells.sum() == correct_cells.numel())
-            return loss, accuracy.item(), is_perfect.item()
-        else:
+            if return_components:
+                is_perfect = (correct_cells.sum() == correct_cells.numel())
+                return loss, accuracy.item(), is_perfect.item()
             return loss
 
 
