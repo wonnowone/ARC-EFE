@@ -186,7 +186,9 @@ class ARCPromptGuidedAgentGPU(nn.Module):
                 pass
 
         # Encode input grid
-        grid_features = self.input_encoder(input_grid.unsqueeze(0))  # [1, H, W, hidden]
+        # Convert to float for convolution (input_grid is typically long/int type)
+        grid_input = input_grid.float() if input_grid.dtype != torch.float32 else input_grid
+        grid_features = self.input_encoder(grid_input.unsqueeze(0))  # [1, H, W, hidden]
         grid_features = grid_features.squeeze(0)  # [H, W, hidden]
 
         # Process prompt
