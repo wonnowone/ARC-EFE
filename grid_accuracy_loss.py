@@ -103,13 +103,15 @@ class ARCPromptGuidedAgentGPU(nn.Module):
                  max_grid_size: int = 30,
                  num_colors: int = 10,
                  hidden_dim: int = 256,
-                 prompt_dim: int = 256):
+                 prompt_dim: int = 256,
+                 max_steps: int = 5):
         """
         Args:
             max_grid_size: Maximum grid size for ARC
             num_colors: Number of color classes (0-9)
             hidden_dim: Hidden dimension for internal networks
             prompt_dim: Dimension of prompt embeddings
+            max_steps: Maximum number of planning steps (dynamically creates heads)
         """
         super().__init__()
 
@@ -117,6 +119,7 @@ class ARCPromptGuidedAgentGPU(nn.Module):
         self.num_colors = num_colors
         self.hidden_dim = hidden_dim
         self.prompt_dim = prompt_dim
+        self.max_steps = max_steps
 
         # Grid encoder: encodes input grid to feature map
         self.input_encoder = nn.Sequential(
@@ -141,14 +144,14 @@ class ARCPromptGuidedAgentGPU(nn.Module):
             nn.ReLU()
         )
 
-        # Prediction heads for planning steps
+        # Prediction heads for planning steps (dynamically created based on max_steps)
         self.planning_steps = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
                 nn.ReLU(),
                 nn.Conv2d(hidden_dim, num_colors, kernel_size=1)
             )
-            for _ in range(3)  # 3 planning steps
+            for _ in range(max_steps)
         ])
 
         # Loss function
@@ -179,17 +182,16 @@ class ARCPromptGuidedAgentGPU(nn.Module):
             input_grid = one_hot
         elif input_grid.dim() == 3:
             if input_grid.shape[0] != self.num_colors:
-                # Already one-hot encoded
                 pass
             else:
-                # Might be in different format, use as-is
                 pass
 
         # Encode input grid
         # Convert to float for convolution (input_grid is typically long/int type)
         grid_input = input_grid.float() if input_grid.dtype != torch.float32 else input_grid
-        grid_features = self.input_encoder(grid_input.unsqueeze(0))  # [1, H, W, hidden]
-        grid_features = grid_features.squeeze(0)  # [H, W, hidden]
+        grid_features = self.input_encoder(grid_input.unsqueeze(0))  # [1, hidden, H, W]
+        grid_features = grid_features.squeeze(0)  # [hidden, H, W]
+        grid_features = grid_features.permute(1, 2, 0)  # [H, W, hidden]
 
         # Process prompt
         prompt_features = self.prompt_processor(prompt_embedding)  # [hidden]

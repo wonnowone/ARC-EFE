@@ -53,7 +53,6 @@ def _clip_sentence(s: str, max_words: int = 25) -> str:
     if len(words) > max_words:
         words = words[:max_words]
     out = " ".join(words)
-    # end with period for stability
     if not out.endswith("."):
         out += "."
     return out
@@ -224,13 +223,13 @@ class PromptCache:
 @dataclass
 class QwenCfg:
     model_name: str = "Qwen/Qwen2.5-1.8B"
-    dtype: str = "float16"          # "float16" | "bfloat16"
+    dtype: str = "float16"      
     max_new_tokens: int = 96
     temperature: float = 0.0        
     top_p: float = 1.0
-    embed_pool: str = "mean"        # "mean" | "cls"
+    embed_pool: str = "mean"       
     cache_dir: Optional[str] = ".cache/hf"
-    use_qwen: bool = True           # turn off to skip any Qwen calls
+    use_qwen: bool = True         
 
 class QwenHybridPrompt(nn.Module):
     """
@@ -281,7 +280,6 @@ class QwenHybridPrompt(nn.Module):
             self.top_p = float(qwen.top_p)
 
     # ---------- public API ----------
-    @torch.no_grad()
     def forward(self,
                 transform_record: Dict[str, Any],
                 input_grid: torch.Tensor,
@@ -341,19 +339,21 @@ class QwenHybridPrompt(nn.Module):
                 audit["revised_rule"] = revised
                 final_rule = base_rule if keep else revised
 
-        # 3) text embedding 
+        # 3) text embedding
         if self._has_tf:
             tokens = self.tokenizer(final_rule, return_tensors="pt").to(self.embedder.device)
             out = self.embedder(**tokens)
-            hs = out.last_hidden_state  
+            hs = out.last_hidden_state
             if self._embed_pool == "cls" and hs.shape[1] > 0:
                 text_emb = hs[:, 0, :]
             else:
                 text_emb = hs.mean(dim=1)
             text_emb = text_emb.squeeze(0).float()
+            embedder_device = self.embedder.device
         else:
             # fallback: zero vector
             text_emb = torch.zeros(self.prompt_dim)
+            embedder_device = device
 
         # 4) control vector from numeric features
         num_vec = features_to_numeric_vec(transform_record).to(device)
@@ -363,13 +363,14 @@ class QwenHybridPrompt(nn.Module):
         if self._has_tf:
             # project (if dims mismatch) to prompt_dim for fusion
             if text_emb.dim() == 1:
-                # attempt to match ctrl_vec dim; if not equal, simple linear projection
+                # ensure text_emb matches ctrl_vec dimension 
                 if text_emb.shape[-1] != ctrl_vec.shape[-1]:
-                    proj = nn.Linear(text_emb.shape[-1], ctrl_vec.shape[-1]).to(text_emb.device)
-                    with torch.no_grad():
-                        nn.init.xavier_uniform_(proj.weight)
-                        nn.init.zeros_(proj.bias)
-                    text_emb = proj(text_emb)
+                    proj = nn.Linear(text_emb.shape[-1], ctrl_vec.shape[-1]).to(device)
+                    # Initialize weights
+                    nn.init.xavier_uniform_(proj.weight)
+                    nn.init.zeros_(proj.bias)
+                    text_emb = proj(text_emb.to(device))
+            # Ensure text_emb is on same device as ctrl_vec for fusion
             text_emb = text_emb.to(ctrl_vec.device)
         else:
             text_emb = text_emb.to(ctrl_vec.device)
@@ -383,8 +384,8 @@ class QwenHybridPrompt(nn.Module):
 
         return {
             "prompt_text": final_rule,
-            "prompt_embedding": text_emb.detach().cpu(),   
-            "control_vector": ctrl_vec.detach().cpu(),
-            "hybrid_embedding": hybrid.detach(),          
+            "prompt_embedding": text_emb,
+            "control_vector": ctrl_vec,
+            "hybrid_embedding": hybrid,
             "audit": audit
         }

@@ -111,8 +111,8 @@ def train_epoch(agent, qwen, train_loader, optimizer, device, feat_reg, epoch, l
         tr = pack_transform_record(inp.unsqueeze(0), out.unsqueeze(0))
         tr = apply_operator_config(tr, inp.unsqueeze(0), out.unsqueeze(0), feat_reg)
 
-        with torch.no_grad():  
-            pack = qwen(tr, inp.unsqueeze(0), out.unsqueeze(0), control_weight=0.5)
+        # Get hybrid embedding from Qwen (no no_grad to enable fine-tuning)
+        pack = qwen(tr, inp.unsqueeze(0), out.unsqueeze(0), control_weight=0.5)
         prompt_emb = pack["hybrid_embedding"].squeeze(0)
 
         # Training step
@@ -226,7 +226,7 @@ def make_qwen_finetunable(device="cuda", model_name=None):
     """
     import os
 
-    # 1) 우선순위: CLI 인자 → 환경변수 → 기본값
+
     name = model_name or os.getenv("QWEN_MODEL", "Qwen/Qwen1.5-0.5B")
     candidates = [
         name,
@@ -320,11 +320,13 @@ def main(epochs=10, agent_lr=5e-4, qwen_lr=1e-4, weight_decay=1e-5,
     logger.log("  Qwen loaded (TRAINABLE - NOT FROZEN)")
 
     # ----- Agent  -----
+    max_planning_steps = 5  # Maximum planning steps 
     agent = ARCPromptGuidedAgentGPU(
         max_grid_size=30,
         num_colors=10,
         hidden_dim=256,
-        prompt_dim=256
+        prompt_dim=256,
+        max_steps=max_planning_steps
     ).to(device)
     logger.log(" Agent created with grid accuracy loss")
 
