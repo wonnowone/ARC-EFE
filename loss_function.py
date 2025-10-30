@@ -69,17 +69,11 @@ class EFELoss(nn.Module):
         self.num_colors = num_colors
         self.prompt_dim = prompt_dim
 
-        # Multi-scale preference learning (different sizes have different preferences)
-        # FIXED: Use lazy initialization to avoid memory explosion (40B parameters)
-        # Only create networks for grid sizes that actually appear in data
         self.preference_embeddings = nn.ParameterDict({})  # Learned per-size preferences
 
-        # Target preferences storage (registered as buffers for device/saver safety)
         self.register_buffer('target_preferences_initialized', torch.tensor(False))
         self.target_preferences_dict = {}
 
-        # Initialize prompt projector deterministically in __init__
-        # This ensures all parameters are registered before optimizer is created
         self.prompt_projector = nn.Linear(prompt_dim, num_colors)
 
         # Learned prompt-to-preference mapping network
@@ -185,11 +179,9 @@ class EFELoss(nn.Module):
     def _get_preference_distribution(self, H: int, W: int, prompt_embedding: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Get preference distribution C = σ(c) for specific grid size with optional prompt guidance.
-        FIXED: Uses learned embeddings instead of random dummy inputs.
         """
         grid_key = f"{H}x{W}"
 
-        # Get device from prompt_embedding or default to CPU
         if prompt_embedding is not None:
             device = prompt_embedding.device
         else:
@@ -211,7 +203,6 @@ class EFELoss(nn.Module):
 
         # Apply prompt guidance if available
         if prompt_embedding is not None:
-            # IMPROVED: Use prompt to modulate per-color preferences
             # Extract color-relevant features from prompt (first num_colors dimensions)
             prompt_color_features = prompt_embedding[:self.num_colors] if len(prompt_embedding) >= self.num_colors else prompt_embedding[:len(prompt_embedding)]
 
@@ -220,7 +211,7 @@ class EFELoss(nn.Module):
                 padding = torch.zeros(self.num_colors - len(prompt_color_features), device=device)
                 prompt_color_features = torch.cat([prompt_color_features, padding])
 
-            # Apply as per-color scaling (allows prompt to emphasize certain colors)
+            # Apply as per-color scaling
             prompt_scales = torch.sigmoid(prompt_color_features)  # [num_colors]
             pref_logits = pref_logits * prompt_scales.view(1, 1, -1)  # Broadcast over H, W
 
@@ -254,8 +245,7 @@ class EFELoss(nn.Module):
         # Compute log probabilities with numerical stability
         log_pred_probs = F.log_softmax(predictions, dim=-1)  # [T, H, W, C]
 
-        # Convert preferences to probabilities (already softmax applied in _get_preference_distribution)
-        # But clamp for numerical stability
+        # Convert preferences to probabilities 
         pref_probs = torch.clamp(preferences, 1e-8, 1.0)  # [H, W, C]
 
         # Compute KL divergence for each timestep

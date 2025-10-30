@@ -204,7 +204,7 @@ def extract_transformation_features(input_grid, output_grid):
     features['colors_removed'] = len(input_colors - output_colors)
     features['color_preservation'] = len(input_colors & output_colors) / len(input_colors | output_colors) if len(input_colors | output_colors) > 0 else 0.0
 
-    # Pixel change analysis (only if same size)
+    # Pixel change analysis 
     if in_h == out_h and in_w == out_w:
         changed_pixels = sum(1 for i in range(in_h) for j in range(in_w)
                            if input_grid[i][j] != output_grid[i][j])

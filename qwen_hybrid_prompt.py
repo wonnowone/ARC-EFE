@@ -1,8 +1,8 @@
 """
 QwenHybridPrompt
-- Feature-driven prompt composer (deterministic) + Qwen critique/patch (optional)
+- Feature-driven prompt composer (deterministic) + Qwen critique/patch
 - Returns:
-    - prompt_text: final short rule sentence (auditable)
+    - prompt_text: final short rule sentence 
     - prompt_embedding: text embedding from Qwen (or fallback)
     - control_vector: numeric-control embedding derived from transformation features
     - hybrid_embedding: fused embedding for ARCPromptGuidedAgent (text⊕control)
@@ -220,7 +220,7 @@ class QwenCfg:
     model_name: str = "Qwen/Qwen2.5-1.8B"
     dtype: str = "float16"          # "float16" | "bfloat16"
     max_new_tokens: int = 96
-    temperature: float = 0.0        # deterministic by default
+    temperature: float = 0.0        
     top_p: float = 1.0
     embed_pool: str = "mean"        # "mean" | "cls"
     cache_dir: Optional[str] = ".cache/hf"
@@ -229,7 +229,7 @@ class QwenCfg:
 class QwenHybridPrompt(nn.Module):
     """
     - Compose deterministic base rule from features
-    - (Optional) Ask Qwen to audit/patch
+    - Ask Qwen to audit/patch
     - Produce text embedding (Qwen) and control vector (numeric MLP)
     - Fuse to hybrid embedding for agent
     """
