@@ -166,6 +166,8 @@ class EFELoss(nn.Module):
         # 6. Prompt consistency: λ_prompt L_prompt(prompt, predictions)
         prompt_loss = torch.tensor(0.0, device=forward_predictions.device)
         if prompt_embedding is not None:
+            # Ensure prompt_embedding is on the same device as predictions
+            prompt_embedding = prompt_embedding.to(forward_predictions.device)
             prompt_loss = self._compute_prompt_consistency_loss(forward_predictions, prompt_embedding)
         losses['prompt_consistency'] = self.lambda_prompt * prompt_loss
         

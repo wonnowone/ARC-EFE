@@ -570,7 +570,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
         max_grid_size=30,
         num_colors=10,
         prompt_dim=256
-    )
+    ).to(device)
     logger.log(" EFE Loss function created with 7 components")
 
     # ----- Optimizer -----
