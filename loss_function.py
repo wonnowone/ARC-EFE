@@ -332,8 +332,8 @@ class EFELoss(nn.Module):
                 )
             else:
                 return F.cross_entropy(
-                    final_pred.view(-1, final_pred.size(-1)),
-                    target.view(-1),
+                    final_pred.reshape(-1, final_pred.size(-1)),
+                    target.reshape(-1),
                     reduction='mean'
                 )
         else:

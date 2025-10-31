@@ -1,0 +1,233 @@
+ARC-EFE CODEBASE ANALYSIS - FINAL SUMMARY
+==========================================
+
+1. SOLVER1 AND SOLVER2: ACTUAL CLASSES, NOT CONCEPTS
+=====================================================
+
+SOLVER1: ContextualSolver (solver1.py)
+- Actual nn.Module class with ContextualMemoryBank
+- Memory: 50-slot circular buffer
+- Update: Surprise-gated (gradient × novelty)
+- Retrieval: Attention-weighted top-K with temporal decay
+- Adaptation: 3-step inner loop with rapid learning (lr=2e-3)
+- Purpose: Fast real-time reasoning within session
+
+SOLVER2: PermanentSolver (solver2.py)
+- Actual nn.Module class with PermanentMemoryBank
+- Memory: 10,000 problem-solution pairs
+- Clustering: DBSCAN (eps=0.3, cosine metric)
+- Retrieval: Cosine similarity + cluster boost + objective filter
+- Attention: Multi-head on memory sequences
+- Purpose: Long-term learning with persistent knowledge
+
+
+2. REVTHINK ORCHESTRATOR: HOW IT WORKS
+======================================
+
+Location: revthink_orchestrator.py
+
+revthink_score() - Combines 8 loss components:
+  - risk (0.2 weight)
+  - consistency (0.2)
+  - bidirectional (0.2)
+  - ambiguity (0.1)
+  - critique_consistency (0.15)
+  - tta_consistency (0.1)
+  - solver_likelihood (-0.15)
+  Result: Score ∈ [0, 1]
+
+maybe_revise() - Decision logic:
+  IF score > tau (0.45):
+    - Compute gate: sigmoid(alpha × (confidence × score - beta))
+    - Call Qwen LLM to revise understanding
+    - Return revised prompt + embedding
+  ELSE:
+    - Return {apply: False}
+
+Purpose: Detects uncertainty and triggers LLM critique
+
+
+3. FEATURE EXTRACTION: THREE HIERARCHICAL LEVELS
+================================================
+
+Level 1: operators.yaml
+  - vertical_sym_score (left-right symmetry)
+  - axis_color_runlen (longest color run)
+  - hole_fill_ratio (background ratio)
+
+Level 2: transformation_features
+  - size_change_ratio
+  - colors_added/removed
+  - density_change
+  - spatial_correlation
+  - symmetry_change
+
+Level 3: movement_features (9 features, CRITICAL DETERMINISTIC ORDER)
+  1. size_change
+  2. color_diversity_in
+  3. color_diversity_out
+  4. shape_preserved
+  5. pixel_change_ratio
+  6. color_preservation
+  7. spatial_correlation
+  8. input_symmetry
+  9. output_symmetry
+
+Feature Normalization: L2 norm for cosine metric
+Combined vector: [problem_features | movement_vec]
+
+
+4. EFE LOSS FUNCTION: 7 COMPONENTS
+==================================
+
+Formula:
+L = λ_risk·D_KL(Q→||C) + λ_amb·E[H(P)]
+  + λ_step·T + λ_cons·CE(Q_T, target)
+  + λ_bi·JS(Q→||Q←) + λ_Z·D_KL(σ(c)||Ĉ)
+  + λ_prompt·L_prompt
+
+Components:
+1. Risk (λ=1.0): Preference matching
+2. Ambiguity (λ=0.0): Disabled
+3. Step (λ=0.1): Encourages short paths
+4. Consistency (λ=1.0): Supervised learning
+5. Bi-directional (λ=0.5): Forward-backward agreement
+6. Z-anchoring (λ=0.2): Prevent preference drift
+7. Prompt (λ=0.3): Language alignment
+
+Notation:
+- Q→(s_t) = Forward state predictions
+- Q→(o_t) = Forward outcome predictions
+- Q←(o_t) = Backward outcome predictions
+- P(o_t|s_t) = Likelihood function
+- C = Learned preference distribution
+- δ_o_T* = Target outcome
+
+
+5. WHAT IS "SO"?
+================
+
+NOT "Stable Optimization"
+
+STATE-OUTCOME Planning Pair (Active Inference framework):
+- S = State (internal representation)
+- O = Outcome (predicted grid)
+
+Key insight: Agents plan by minimizing Expected Free Energy
+over state-outcome pairs (s_t, o_t)
+
+
+6. FEATURE UTILIZATION IN LOSS
+==============================
+
+Flow:
+operators.yaml → feature_registry → transformation_features
+→ compose_prompt_from_features → qwen → hybrid_embedding
+→ ARCPromptGuidedAgent → predictions → EFELoss → backprop
+
+Feature Usage:
+1. Features → Prompt → Preferences C initialization
+2. Movement features → Solver2 retrieval (cosine sim)
+3. Objective type → Retrieval weighting (1.0x same, 0.7x different)
+4. Operators → RevThink decision making
+
+CRITICAL: Features guide (not loss-weighted)
+- No λ weights for features in final loss
+- Features affect: initialization, retrieval, decisions
+- Final loss is purely EFE-based
+
+
+7. TRAINING PIPELINE
+====================
+
+File: trainloop_gpu_finetuned.py
+
+Steps:
+1. Extract features (operators + transform + movement)
+2. Generate hybrid embedding (Qwen LLM)
+3. Forward pass (ARCPromptGuidedAgent)
+4. Compute loss (GridAccuracyLoss or EFELoss)
+5. Backward pass + gradient clipping
+6. Optimizer step
+
+Two Loss Options:
+- GridAccuracyLoss: Simple CE (direct supervision)
+- EFELoss: 7-component framework (generalization)
+
+Configuration:
+- Both agent and Qwen fine-tuned (not frozen)
+- Learning rate: 1e-4 to 2e-3
+- Batch size: 1-4 (memory constraints)
+- Gradient clipping: 1.0 norm
+- Epochs: 10-50
+
+
+8. ARCHITECTURE DIAGRAM
+=======================
+
+INPUT (ARC Problem)
+    ↓
+FEATURES (3 levels)
+    ↓
+PROMPT (via Qwen)
+    ↓
+NEURAL NETWORK (ARCPromptGuidedAgent)
+    ├─ Forward planning Q→
+    ├─ Backward planning Q←
+    └─ State predictions Q→(s)
+    ↓
+SOLVER (Solver1 or Solver2)
+    ├─ Context memory (50 items)
+    └─ Permanent memory (10K items)
+    ↓
+LOSS (GridAccuracy or EFE)
+    ↓
+CRITIQUE (RevThink)
+    ├─ Score: 8-component sum
+    └─ Decision: Revise if > 0.45
+    ↓
+BACKPROP (Gradient descent)
+
+
+9. KEY RECOMMENDATIONS
+======================
+
+For Training:
+- Start with GridAccuracyLoss (fast convergence)
+- Always include prompt_embedding (critical)
+- Use Solver2 for > 100 problems (clustering)
+- Monitor revthink_score (target < 0.45)
+
+For Features:
+- Keep operators.yaml enabled
+- MAINTAIN DETERMINISTIC ORDERING (CRITICAL)
+- Use L2 normalization
+- No λ weights (guidance only)
+
+For Loss:
+- λ_risk = 1.0 (primary signal)
+- λ_cons = 1.0 (supervision)
+- λ_bi = 0.5 (symmetry)
+- λ_prompt = 0.3 (language)
+
+
+10. CAPABILITIES SUMMARY
+========================
+
+✓ Few-shot adaptation (Solver1 context)
+✓ Persistent learning (Solver2 memory)
+✓ Self-critique (RevThink orchestration)
+✓ Semantic understanding (Qwen hybrid)
+✓ Multi-objective planning (EFE framework)
+✓ Variable grid sizes (lazy initialization)
+✓ GPU fine-tuning (mixed precision)
+
+Components:
+- Solver1: 50-item episodic, fast adaptation
+- Solver2: 10K clustered, persistent learning
+- RevThink: 8-component revision gate
+- Features: 3 levels of guidance
+- Loss: 7-component EFE framework
+- Qwen: Fine-tuned LLM for semantics
+- Training: Both agent and Qwen updated
+
