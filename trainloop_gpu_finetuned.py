@@ -1,10 +1,14 @@
 import os
 import sys
+import json
 import torch
 import torch.nn as nn
 from datetime import datetime
 from torch.utils.data import DataLoader
 from typing import Dict, Optional
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
 
 from dataset_arc import ARCDataset
 from qwen_hybrid_prompt import QwenHybridPrompt, QwenCfg
@@ -64,6 +68,96 @@ class TrainingLogger:
         message = (f"[Epoch {epoch}] Loss: {loss:.6f} | "
                   f"Val Accuracy: {val_acc:.4f} ({val_perfect}/{total_samples} perfect)")
         self.log(message)
+
+
+class TrainingMetricsTracker:
+    """Track and visualize training metrics (loss, accuracy, components)"""
+
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        self.metrics_file = os.path.join(output_dir, "metrics.json")
+        self.metrics = {
+            'epochs': [],
+            'train_loss': [],
+            'val_accuracy': [],
+            'val_perfect': [],
+            'val_total': [],
+            'loss_components': {}
+        }
+
+    def log_epoch(self, epoch: int, train_loss: float, val_acc: float,
+                  val_perfect: int, val_total: int, loss_components: Dict = None):
+        """Log metrics for an epoch"""
+        self.metrics['epochs'].append(epoch)
+        self.metrics['train_loss'].append(train_loss)
+        self.metrics['val_accuracy'].append(val_acc)
+        self.metrics['val_perfect'].append(val_perfect)
+        self.metrics['val_total'].append(val_total)
+
+        if loss_components:
+            for key, val in loss_components.items():
+                if key not in self.metrics['loss_components']:
+                    self.metrics['loss_components'][key] = []
+                self.metrics['loss_components'][key].append(float(val) if hasattr(val, '__float__') else val)
+
+    def save_metrics(self):
+        """Save metrics to JSON file"""
+        with open(self.metrics_file, 'w') as f:
+            json.dump(self.metrics, f, indent=2)
+
+    def plot_metrics(self):
+        """Create visualization plots of metrics"""
+        if not self.metrics['epochs']:
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle('Training Metrics', fontsize=16)
+
+        # Plot 1: Training Loss
+        ax = axes[0, 0]
+        ax.plot(self.metrics['epochs'], self.metrics['train_loss'], 'b-o', linewidth=2)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.set_title('Training Loss')
+        ax.grid(True, alpha=0.3)
+
+        # Plot 2: Validation Accuracy
+        ax = axes[0, 1]
+        ax.plot(self.metrics['epochs'], self.metrics['val_accuracy'], 'g-o', linewidth=2)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Accuracy')
+        ax.set_title('Validation Accuracy')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0, 1])
+
+        # Plot 3: Perfect Grids
+        ax = axes[1, 0]
+        perfect_rate = [p/t if t > 0 else 0 for p, t in zip(self.metrics['val_perfect'], self.metrics['val_total'])]
+        ax.bar(self.metrics['epochs'], perfect_rate, color='orange', alpha=0.7)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Perfect Rate')
+        ax.set_title('Perfect Grids Rate')
+        ax.set_ylim([0, 1])
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # Plot 4: Loss Components Breakdown
+        ax = axes[1, 1]
+        if self.metrics['loss_components']:
+            components = self.metrics['loss_components']
+            for key, values in components.items():
+                if values:  # Only plot if has values
+                    ax.plot(range(len(values)), values, marker='o', label=key, alpha=0.7)
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Loss Component Value')
+            ax.set_title('Loss Components Breakdown')
+            ax.legend(fontsize=8, loc='best')
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plot_file = os.path.join(self.output_dir, "metrics_plot.png")
+        plt.savefig(plot_file, dpi=100, bbox_inches='tight')
+        plt.close()
+        return plot_file
 
 
 def train_epoch(agent, qwen, solver2, efe_loss, train_loader, optimizer, device, feat_reg, epoch, logger, max_batches=None):
@@ -231,7 +325,7 @@ def train_epoch(agent, qwen, solver2, efe_loss, train_loader, optimizer, device,
     logger.log(f"    Memory bank updates: {memory_updates}/{batches_processed}")
     logger.log(f"    Solver2 memory size: {len(solver2.memory_bank.memories)}")
 
-    return avg_loss
+    return avg_loss, avg_components
 
 
 def evaluate(agent, qwen, solver2, efe_loss, eval_loader, device, feat_reg, max_batches=None, binary_accuracy=True):
@@ -391,6 +485,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
     output_dir = f"runs/arc_gpu_finetuned_{timestamp}"
     os.makedirs(output_dir, exist_ok=True)
     logger = TrainingLogger(output_dir)
+    metrics_tracker = TrainingMetricsTracker(output_dir)
 
     logger.log(f"SYSTEM CONFIG:")
     logger.log(f"  Device: {device}")
@@ -510,7 +605,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
     for epoch in range(epochs):
         logger.log(f"\n[Epoch {epoch}/{epochs-1}]")
 
-        avg_loss = train_epoch(agent, qwen, solver2, efe_loss, train_ld, optim, device, feat_reg,
+        avg_loss, loss_components = train_epoch(agent, qwen, solver2, efe_loss, train_ld, optim, device, feat_reg,
                                epoch, logger, max_batches_per_epoch)
         logger.log(f"  Average Loss: {avg_loss:.6f}")
 
@@ -521,11 +616,21 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
             )
             logger.log(f"  Val Accuracy: {val_acc:.4f} ({val_perfect}/{val_total} grids perfect)")
 
+            # Track metrics
+            metrics_tracker.log_epoch(
+                epoch=epoch,
+                train_loss=avg_loss,
+                val_acc=val_acc,
+                val_perfect=val_perfect,
+                val_total=val_total,
+                loss_components=loss_components
+            )
+
             if val_acc > best_acc:
                 best_acc = val_acc
                 torch.save(agent.state_dict(), best_ckpt)
                 torch.save(qwen.state_dict(),  qwen_ckpt)
-                logger.log(f"  ✓ Best checkpoint saved!")
+                logger.log(f"  Best checkpoint saved!")
 
     logger.log("\n" + "="*70)
     logger.log("FINAL TEST EVALUATION (Strict Binary Accuracy)")
@@ -536,6 +641,12 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
     )
     logger.log(f"\nTest Accuracy (Binary): {test_acc:.4f} ({test_perfect}/{test_total} grids perfect)")
 
+    # Save and visualize metrics
+    metrics_tracker.save_metrics()
+    plot_file = metrics_tracker.plot_metrics()
+    if plot_file:
+        logger.log(f"\nMetrics plot saved: {plot_file}")
+
     logger.log("\n" + "="*70)
     logger.log("TRAINING COMPLETED".center(70))
     logger.log("="*70 + "\n")
@@ -543,6 +654,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
     logger.log(f"Output directory: {output_dir}")
     logger.log(f"Agent checkpoint: {best_ckpt}")
     logger.log(f"Qwen checkpoint: {qwen_ckpt}")
+    logger.log(f"Metrics JSON: {metrics_tracker.metrics_file}")
     logger.log(f"Final test accuracy: {test_acc:.4f}\n")
 
     return output_dir, best_acc
