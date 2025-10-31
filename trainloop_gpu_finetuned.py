@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import warnings
 import torch
 import torch.nn as nn
 from datetime import datetime
@@ -9,6 +10,17 @@ from typing import Dict, Optional
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+import time
+
+# Suppress transformers and other verbose warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+# Suppress specific transformers messages
+import logging
+logging.getLogger('transformers.generation_utils').setLevel(logging.ERROR)
+logging.getLogger('transformers.modeling_utils').setLevel(logging.ERROR)
 
 from dataset_arc import ARCDataset
 from qwen_hybrid_prompt import QwenHybridPrompt, QwenCfg
@@ -185,13 +197,15 @@ def train_epoch(agent, qwen, solver2, efe_loss, train_loader, optimizer, device,
     total_batches = len(train_loader)
     memory_updates = 0
 
-    for batch_idx, batch in enumerate(train_loader):
+    # Adjust total for tqdm if max_batches is set
+    display_total = min(total_batches, max_batches) if max_batches else total_batches
+    pbar = tqdm(enumerate(train_loader), total=display_total,
+                desc=f"Epoch {epoch} Training", unit="batch",
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+
+    for batch_idx, batch in pbar:
         if max_batches and batch_idx >= max_batches:
             break
-
-        # Progress reporting every 50 batches
-        if (batch_idx + 1) % 50 == 0 or batch_idx == total_batches - 1:
-            logger.log(f"  Processing batch {batch_idx + 1}/{total_batches}...")
 
         # ========== LOAD DATA ==========
         # inp: [1, H, W] or [H, W]
@@ -312,6 +326,12 @@ def train_epoch(agent, qwen, solver2, efe_loss, train_loader, optimizer, device,
 
         batches_processed += 1
 
+        # Update progress bar with current loss
+        avg_epoch_loss = epoch_loss / batches_processed
+        pbar.set_postfix({'loss': f'{avg_epoch_loss:.4f}'}, refresh=True)
+
+    pbar.close()
+
     # ========== EPOCH SUMMARY ==========
     avg_loss = epoch_loss / max(batches_processed, 1)
     avg_components = {k: v / max(batches_processed, 1) for k, v in loss_components_sum.items()}
@@ -348,8 +368,15 @@ def evaluate(agent, qwen, solver2, efe_loss, eval_loader, device, feat_reg, max_
     total_samples = 0
     eval_loss = 0.0
 
+    # Create progress bar for evaluation
+    eval_total = len(eval_loader)
+    display_total = min(eval_total, max_batches) if max_batches else eval_total
+
     with torch.no_grad():
-        for batch_idx, batch in enumerate(eval_loader):
+        pbar = tqdm(enumerate(eval_loader), total=display_total, desc="Validation",
+                    unit="batch", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+
+        for batch_idx, batch in pbar:
             if max_batches and batch_idx >= max_batches:
                 break
 
@@ -423,6 +450,12 @@ def evaluate(agent, qwen, solver2, efe_loss, eval_loader, device, feat_reg, max_
 
             acc_sum += acc
             total_samples += 1
+
+            # Update progress bar with current accuracy
+            current_acc = acc_sum / max(total_samples, 1)
+            pbar.set_postfix({'acc': f'{current_acc:.4f}'}, refresh=True)
+
+        pbar.close()
 
     avg_acc = acc_sum / max(total_samples, 1)
     return avg_acc, perfect_count, total_samples
