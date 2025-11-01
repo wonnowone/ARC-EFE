@@ -250,19 +250,26 @@ class EFELoss(nn.Module):
 
         return inference_risk
 
-    def _normalize_grid_size_difference(self, loss_value: torch.Tensor,
+    def _normalize_grid_size_difference(self, loss_value, device,
                                         H: int, W: int) -> torch.Tensor:
         """
         Normalize loss by grid size to mitigate differences between varying grid sizes.
         Uses adaptive scaling based on grid area.
 
         Args:
-            loss_value: Scalar loss value
+            loss_value: Scalar loss value or tensor
+            device: Device to place tensors on
             H, W: Grid dimensions
 
         Returns:
             Normalized loss value
         """
+        # Convert to tensor if needed
+        if not isinstance(loss_value, torch.Tensor):
+            loss_value = torch.tensor(loss_value, dtype=torch.float32, device=device)
+        else:
+            loss_value = loss_value.to(device)
+
         grid_area = H * W
         max_area = self.max_grid_size * self.max_grid_size
 
@@ -270,7 +277,7 @@ class EFELoss(nn.Module):
         size_factor = (grid_area / max_area) ** 0.5
 
         # Apply logarithmic damping for extreme size differences
-        log_factor = torch.log(torch.tensor(grid_area / max_area + 1.0, device=loss_value.device))
+        log_factor = torch.log(torch.tensor(grid_area / max_area + 1.0, dtype=torch.float32, device=device))
 
         return loss_value / (size_factor * (1.0 + 0.1 * log_factor))
 
@@ -346,10 +353,10 @@ class EFELoss(nn.Module):
 
         # 2. step/risk budget: λ_step T (scaled by grid size for fairness)
         grid_scale = (H * W) / (self.max_grid_size * self.max_grid_size)
-        step_penalty = torch.tensor(self.lambda_step * T * grid_scale, device=forward_predictions.device)
+        step_penalty = self.lambda_step * T * grid_scale
 
         # NEW: Apply grid size normalization
-        step_penalty = self._normalize_grid_size_difference(step_penalty, H, W)
+        step_penalty = self._normalize_grid_size_difference(step_penalty, forward_predictions.device, H, W)
         losses['step_penalty'] = step_penalty
 
         # NEW: Grid size difference mitigation loss
