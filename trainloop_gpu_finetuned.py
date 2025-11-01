@@ -502,11 +502,13 @@ def make_qwen_finetunable(device="cuda", model_name=None):
 
 
 
-def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
-         grad_accum_steps=1, grad_clip=1.0, warmup_steps=100,
+def main(epochs=10, agent_lr=1e-5, qwen_lr=5e-5, weight_decay=1e-6,
+         grad_accum_steps=4, grad_clip=1.0, warmup_steps=100,
          max_batches_per_epoch=None, val_frequency=1, skip_test=False,
-         device="cuda", model_name=None, seed=42, save_frequency=1,
-         freeze_qwen=True):
+         device="cuda", model_name="Qwen/Qwen2-0.5B", seed=42, save_frequency=1,
+         freeze_qwen=False):
+    
+
     """
     Main training loop for GPU with Qwen fine-tuning.
     """
