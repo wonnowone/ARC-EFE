@@ -346,7 +346,7 @@ class EFELoss(nn.Module):
 
         # 2. step/risk budget: λ_step T (scaled by grid size for fairness)
         grid_scale = (H * W) / (self.max_grid_size * self.max_grid_size)
-        step_penalty = self.lambda_step * T * grid_scale
+        step_penalty = torch.tensor(self.lambda_step * T * grid_scale, device=forward_predictions.device)
 
         # NEW: Apply grid size normalization
         step_penalty = self._normalize_grid_size_difference(step_penalty, H, W)
