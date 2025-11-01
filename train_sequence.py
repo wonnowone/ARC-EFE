@@ -184,7 +184,7 @@ def make_agent(config: TrainingConfig) -> ARCPromptGuidedAgent:
 def make_qwen(config: TrainingConfig) -> QwenHybridPrompt:
     """Create Qwen prompt generator"""
     qcfg = QwenCfg(
-        model_name="Qwen/Qwen2.5-1.8B",
+        model_name="Qwen/Qwen2.5-1.5B",
         dtype="float16",
         temperature=0.0,
         use_qwen=True

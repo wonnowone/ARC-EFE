@@ -1,0 +1,403 @@
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║             TRAINING FILES SUMMARY - What Each File Does                         ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+
+═════════════════════════════════════════════════════════════════════════════════
+                              EXECUTION ENTRY POINTS
+═════════════════════════════════════════════════════════════════════════════════
+
+┌─ run_main.py ───────────────────────────────────────────────────────────────┐
+│  Purpose: Full end-to-end pipeline                                         │
+│  Entry: main()                                                              │
+│  Config: PipelineConfig class                                               │
+│  Uses: train_sequence.py + test_sequence.py                                │
+│  Output: runs/arc_full_run_YYYYMMDD_HHMMSS/                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ run_gpu_finetuned.py ───────────────────────────────────────────────────────┐
+│  Purpose: GPU-accelerated training wrapper                                  │
+│  Entry: main() → calls trainloop_gpu_finetuned.main()                      │
+│  Config: Command line args                                                  │
+│  Uses: trainloop_gpu_finetuned.py                                          │
+│  Output: runs/arc_gpu_finetuned_YYYYMMDD_HHMMSS/                          │
+│  Special: Supports --freeze_qwen True/False (NEW!)                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ run_cpu_simple.py ──────────────────────────────────────────────────────────┐
+│  Purpose: CPU-only lightweight training                                     │
+│  Entry: main() → calls trainloop.train_one_epoch()                         │
+│  Config: Command line args                                                  │
+│  Uses: trainloop.py                                                         │
+│  Output: runs/arc_cpu_YYYYMMDD_HHMMSS/                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════════
+                              CORE TRAINING FILES
+═════════════════════════════════════════════════════════════════════════════════
+
+┌─ train_sequence.py ──────────────────────────────────────────────────────────┐
+│  Purpose: High-level training pipeline                                      │
+│  Key Responsibilities:                                                      │
+│    ✓ Define TrainingConfig (epochs, batch_size, LR, etc.)                 │
+│    ✓ Create TrainingLogger (logs to JSONL files)                          │
+│    ✓ Main training loop (orchestrates per-epoch training)                  │
+│    ✓ Logging metrics to train_log.jsonl, eval_log.jsonl                  │
+│                                                                             │
+│  Key Classes:                                                               │
+│    - TrainingConfig       (Training settings)                              │
+│    - TrainingLogger       (Logging to files)                               │
+│    - TrainingMetricsTracker (Metrics aggregation)                          │
+│                                                                             │
+│  Hardcoded Config (Lines 23-29):                                          │
+│    TTA_EVAL_INTERVAL = 50                                                │
+│    CHECKPOINT_INTERVAL = 100                                             │
+│    GRAD_CLIP_NORM = 1.0                                                 │
+│    LEARNING_RATE = 1e-3                                                 │
+│    EPOCHS = 5                                                            │
+│    BATCH_SIZE = 1                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ trainloop.py ───────────────────────────────────────────────────────────────┐
+│  Purpose: Single epoch training logic                                       │
+│  Key Responsibilities:                                                      │
+│    ✓ Per-epoch loop (batches)                                             │
+│    ✓ Load batch, extract features                                         │
+│    ✓ Generate Qwen prompt                                                  │
+│    ✓ Train episode with agent                                             │
+│    ✓ RevThink revision (if needed)                                        │
+│    ✓ Backward pass + optimization                                         │
+│                                                                             │
+│  Key Functions:                                                             │
+│    - train_one_epoch()    (Main epoch loop)                              │
+│    - make_agent()         (Create ARCPromptGuidedAgent)                 │
+│    - make_qwen()          (Create QwenHybridPrompt)                     │
+│    - seed_all()           (Set random seeds)                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ trainloop_gpu_finetuned.py ─────────────────────────────────────────────────┐
+│  Purpose: MAIN TRAINING SCRIPT (GPU-optimized)                              │
+│  Key Responsibilities:                                                      │
+│    ✓ Initialize all models (agent, Qwen, EFE loss, solvers)              │
+│    ✓ Set up optimizers with per-component LR schedules                   │
+│    ✓ Main training loop (epochs)                                         │
+│    ✓ Checkpoint saving/loading                                           │
+│    ✓ Validation/evaluation                                               │
+│    ✓ Comprehensive logging                                               │
+│                                                                             │
+│  Function Parameters (Lines 505-509) - MAIN CONFIG!:                     │
+│    epochs=10                  Total epochs to train                      │
+│    agent_lr=1e-5              Agent learning rate                        │
+│    qwen_lr=None               Qwen learning rate (if not frozen)         │
+│    weight_decay=1e-6          L2 regularization                          │
+│    grad_accum_steps=1         Gradient accumulation                      │
+│    grad_clip=1.0              Gradient clipping norm                     │
+│    warmup_steps=100           Warmup period                              │
+│    max_batches_per_epoch=None Limit batches (None = full)                │
+│    val_frequency=1            Eval every N epochs                        │
+│    skip_test=False            Skip final test                            │
+│    device="cuda"              Device (cuda/cpu)                          │
+│    model_name=None            Qwen model ID override                     │
+│    seed=42                    Random seed                                │
+│    save_frequency=1           Save checkpoint freq                       │
+│    freeze_qwen=True           🆕 NEW: Control Qwen training!            │
+│                                                                             │
+│  Key Classes:                                                               │
+│    - TrainingLogger          (Comprehensive logging)                      │
+│    - TrainingMetricsTracker  (Metrics aggregation)                       │
+│                                                                             │
+│  Creates Models:                                                            │
+│    1. ARCPromptGuidedAgent   (EFE loss agent)                           │
+│    2. QwenHybridPrompt       (LLM prompt generation)                    │
+│    3. PermanentSolver        (Solver2, long-term memory)                │
+│    4. EFELoss               (Loss function)                             │
+│    5. RevThinkOrchestrator   (Prompt revision)                          │
+│    6. TestTimeAdaptationSystem (TTA)                                    │
+│                                                                             │
+│  Output Files:                                                              │
+│    ✓ train_log.jsonl         (Per-batch training metrics)               │
+│    ✓ eval_log.jsonl          (Per-epoch evaluation)                     │
+│    ✓ tta_log.jsonl           (TTA evaluation)                           │
+│    ✓ metrics.jsonl           (Summary metrics)                          │
+│    ✓ checkpoints.jsonl       (Checkpoint metadata)                      │
+│    ✓ checkpoints/*.pt        (Model checkpoints)                        │
+│    ✓ metrics_plot.png        (Loss curves)                              │
+│    ✓ training_log.txt        (Human-readable log)                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ test_sequence.py ───────────────────────────────────────────────────────────┐
+│  Purpose: Testing and evaluation pipeline                                   │
+│  Key Responsibilities:                                                      │
+│    ✓ Evaluate on train/test splits                                       │
+│    ✓ Compute binary accuracy (strict ARC evaluation)                     │
+│    ✓ Optional TTA evaluation                                             │
+│    ✓ Batch checkpoint evaluation                                         │
+│                                                                             │
+│  Key Classes:                                                               │
+│    - TestConfig             (Testing settings)                            │
+│                                                                             │
+│  Key Functions:                                                             │
+│    - test_sequence()        (Main test loop)                            │
+│    - batch_test_checkpoints() (Test multiple checkpoints)              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════════
+                           MODEL ARCHITECTURE FILES
+═════════════════════════════════════════════════════════════════════════════════
+
+┌─ loss_function.py ───────────────────────────────────────────────────────────┐
+│  Purpose: EFE Loss computation + Agent architecture                         │
+│  Key Components:                                                            │
+│    ✓ EFELossConfig class (11 loss weights + profiles)                    │
+│    ✓ EFELoss class (forward computation)                                 │
+│    ✓ ARCPromptGuidedAgent class (forward/backward planning)              │
+│                                                                             │
+│  Config (Lines 25-88):                                                    │
+│    EFELossConfig dataclass with 11 lambda parameters                    │
+│    Pre-configured profiles:                                              │
+│      - aggressive_grid_matching() [4× grid matching boost]             │
+│      - reversibility_focus() [0.8 reversibility weight]                 │
+│      - balanced() [default]                                             │
+│                                                                             │
+│  Key Methods:                                                               │
+│    - forward() [main loss computation]                                   │
+│    - _compute_grid_matching_loss() [PRIMARY objective]                  │
+│    - _compute_reversibility_loss() [invertibility check]                │
+│    - train_episode() [complete training step]                           │
+│    - forward_planning() [Q→ predictions]                                │
+│    - backward_planning() [Q← predictions]                               │
+│                                                                             │
+│  Loss Terms (9 total):                                                     │
+│    1. Grid Matching (PRIMARY - unweighted)                               │
+│    2. Risk (λ=1.0)                                                      │
+│    3. Ambiguity (λ=0.0)                                                 │
+│    4. Step Penalty (λ=0.1)                                              │
+│    5. Consistency (λ=1.0)                                               │
+│    6. Bidirectional (λ=0.5)                                             │
+│    7. Z-Anchoring (λ=0.2)                                               │
+│    8. Prompt Consistency (λ=0.3)                                        │
+│    9. Reversibility (λ=0.4) [NEW]                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ qwen_hybrid_prompt.py ──────────────────────────────────────────────────────┐
+│  Purpose: Qwen LLM integration for prompt generation                        │
+│  Key Components:                                                            │
+│    ✓ QwenCfg configuration class                                          │
+│    ✓ QwenHybridPrompt model                                              │
+│    ✓ Transformer-based feature encoding                                  │
+│                                                                             │
+│  Config (Lines 224-240):                                                  │
+│    model_name = "Qwen/Qwen2.5-1.8B"                                     │
+│    dtype = "float16"                                                    │
+│    max_new_tokens = 96                                                  │
+│    temperature = 0.0 (deterministic)                                    │
+│    top_p = 0.9                                                          │
+│    cache_dir = ".cache/hf"                                              │
+│                                                                             │
+│  Key Feature (NEW!):                                                        │
+│    ✓ Qwen is now UNFROZEN and trainable!                               │
+│      (See line 279-283: Explicitly set requires_grad=True)             │
+│                                                                             │
+│  Key Methods:                                                               │
+│    - forward() [generate prompt + embeddings]                           │
+│    - __init__() [load and configure Qwen]                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ revthink_orchestrator.py ───────────────────────────────────────────────────┐
+│  Purpose: Loss-based prompt revision orchestration                          │
+│  Key Components:                                                            │
+│    ✓ RevThinkCfg configuration class                                      │
+│    ✓ RevThinkOrchestrator class                                          │
+│                                                                             │
+│  Config (Lines 7-13):                                                     │
+│    tau = 0.45       Revision trigger threshold                         │
+│    alpha = 2.0      Gate sharpness                                     │
+│    beta = 0.3       Gate bias                                          │
+│    gamma = 0.5      Lambda prompt boost factor                         │
+│    eta = 0.2        Z-anchoring blend                                  │
+│    mask_weight = 0.5                                                  │
+│                                                                             │
+│  Key Feature (NEW!):                                                        │
+│    ✓ Reversibility loss now weighted at 25% in revthink_score!       │
+│    ✓ Highest weight signal after consistency (20%)                    │
+│    ✓ Triggers prompt updates when backward planning fails             │
+│                                                                             │
+│  Key Methods:                                                               │
+│    - maybe_revise() [decide to revise prompt]                         │
+│    - revthink_score() [compute need for revision]                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ tta.py ─────────────────────────────────────────────────────────────────────┐
+│  Purpose: Test-time adaptation during training                              │
+│  Key Components:                                                            │
+│    ✓ TestTimeAdaptationSystem class                                       │
+│    ✓ SurpriseBasedMemory (memory management)                             │
+│    ✓ MetaAdapter (parameter adaptation)                                  │
+│    ✓ SolverRouter (solver selection)                                     │
+│    ✓ AdaptiveLikelihoodHead (likelihood adaptation)                      │
+│                                                                             │
+│  Config (Lines 33-48):                                                    │
+│    memory_size = 1000                                                  │
+│    surprise_threshold = 0.65                                           │
+│    adaptation_steps = 5                                                │
+│    adaptation_lr = 1e-3                                                │
+│                                                                             │
+│  Key Feature (NEW!):                                                        │
+│    ✓ train_time_adapt() method for TTA during training               │
+│    ✓ Surprise-gated memory writes                                    │
+│    ✓ Tracks TTA improvement per step                                │
+│                                                                             │
+│  Key Methods:                                                               │
+│    - train_time_adapt() [TTA during training] [NEW]                   │
+│    - test_time_adapt() [TTA at test time]                            │
+│    - compute_surprise() [surprise-based gating]                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ solver1.py ─────────────────────────────────────────────────────────────────┐
+│  Purpose: Short-term contextual memory with pattern storage                 │
+│  Key Components:                                                            │
+│    ✓ ContextualMemoryBank (fast episodic memory)                          │
+│    ✓ ContextualSolver (uses contextual memory)                            │
+│    ✓ Pattern storage system [NEW]                                         │
+│                                                                             │
+│  Config (Lines 28-40):                                                    │
+│    context_size = 50                                                  │
+│    surprise_threshold = 0.2                                           │
+│    temporal_decay = 0.9                                               │
+│                                                                             │
+│  Key Features (NEW!):                                                       │
+│    ✓ store_known_pattern() [store successful patterns]               │
+│    ✓ retrieve_similar_patterns() [find analogous solutions]         │
+│    ✓ _group_pattern() [cluster similar patterns]                    │
+│    ✓ _compute_pattern_similarity() [pattern matching]               │
+│    ✓ Grid difference surprise detection (>30% = HIGH)                │
+│                                                                             │
+│  Key Methods:                                                               │
+│    - compute_contextual_surprise() [multi-source surprise]           │
+│    - solve_with_context() [use memory for solving]                   │
+│    - retrieve_context() [attention-based retrieval]                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ solver2.py ─────────────────────────────────────────────────────────────────┐
+│  Purpose: Long-term permanent memory with problem classification             │
+│  Key Components:                                                            │
+│    ✓ PermanentMemoryBank (DBSCAN clustering)                             │
+│    ✓ ProblemObjectiveExtractor (feature extraction)                      │
+│    ✓ PermanentSolver (uses permanent memory)                             │
+│                                                                             │
+│  Config (Lines 161-172):                                                  │
+│    feature_dim = 256                                                  │
+│    max_memories = 10000                                               │
+│    DBSCAN eps = 0.3 (clustering threshold)                            │
+│                                                                             │
+│  Key Methods:                                                               │
+│    - store_memory() [store problem-solution pairs]                    │
+│    - retrieve_similar_problems() [find analogous problems]           │
+│    - get_cluster_statistics() [monitor clustering health]            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════════
+                         DATA & FEATURE FILES
+═════════════════════════════════════════════════════════════════════════════════
+
+┌─ dataset_arc.py ─────────────────────────────────────────────────────────────┐
+│  Purpose: Load and manage ARC dataset                                        │
+│  Key Class:                                                                 │
+│    ARCDataset(path, split="train")                                         │
+│                                                                             │
+│  Responsibilities:                                                          │
+│    ✓ Load training.json file                                             │
+│    ✓ Split into train/test/validation                                   │
+│    ✓ Provide problem grids and outputs                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ feature_extraction.py ──────────────────────────────────────────────────────┐
+│  Purpose: Extract transformation features from input-output pairs            │
+│  Key Function:                                                              │
+│    extract_transformation_features(input_grid, output_grid)                │
+│                                                                             │
+│  Output: 15-dimensional feature vector                                      │
+│    1. size_change_ratio                                                   │
+│    2. size_preserved                                                      │
+│    3. pixel_change_ratio                                                  │
+│    4. color_preservation                                                  │
+│    5. spatial_correlation                                                 │
+│    6-15. (symmetry, density, colors added/removed, etc.)                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ feature_registry.py ────────────────────────────────────────────────────────┐
+│  Purpose: Manage feature extraction operators                               │
+│  Key Class:                                                                 │
+│    FeatureRegistry()                                                        │
+│                                                                             │
+│  Responsibilities:                                                          │
+│    ✓ Load operators from operators.yaml                                   │
+│    ✓ Apply operators to features                                          │
+│    ✓ Combine features for training                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─ configs/operators.yaml ─────────────────────────────────────────────────────┐
+│  Purpose: Configure feature extraction operators                            │
+│  Type: External YAML configuration file                                     │
+│  Contents: Feature operator definitions and parameters                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════════
+                       ALTERNATIVE LOSS FILES (Optional)
+═════════════════════════════════════════════════════════════════════════════════
+
+grid_accuracy_loss.py        Focus on pixel-by-pixel grid accuracy
+grid_transformation_loss.py  Focus on transformation properties (shape, color, etc.)
+priority_efe_loss.py         Priority-based EFE with curriculum learning
+
+
+═════════════════════════════════════════════════════════════════════════════════
+                          FILE DEPENDENCY GRAPH
+═════════════════════════════════════════════════════════════════════════════════
+
+run_main.py
+    ├── train_sequence.py (TrainingConfig, TrainingLogger)
+    │   ├── dataset_arc.py (ARCDataset)
+    │   ├── qwen_hybrid_prompt.py (QwenHybridPrompt, QwenCfg)
+    │   ├── loss_function.py (ARCPromptGuidedAgent, EFELoss)
+    │   ├── revthink_orchestrator.py (RevThinkOrchestrator, RevThinkCfg)
+    │   ├── tta.py (TestTimeAdaptationSystem)
+    │   ├── feature_registry.py (FeatureRegistry)
+    │   └── feature_extraction.py (extract_transformation_features)
+    │
+    └── test_sequence.py (TestConfig)
+        └── (uses same models as train_sequence.py)
+
+run_gpu_finetuned.py → trainloop_gpu_finetuned.py (main)
+    ├── dataset_arc.py (ARCDataset)
+    ├── qwen_hybrid_prompt.py (QwenHybridPrompt, QwenCfg)
+    ├── loss_function.py (EFELoss, ARCPromptGuidedAgent)
+    ├── revthink_orchestrator.py (RevThinkOrchestrator, RevThinkCfg)
+    ├── tta.py (TestTimeAdaptationSystem)
+    ├── solver2.py (PermanentSolver)
+    ├── feature_registry.py (FeatureRegistry)
+    └── feature_extraction.py (extract_transformation_features)
+
+run_cpu_simple.py → trainloop.py (train_one_epoch)
+    └── (uses same models as above)
+
+
+═════════════════════════════════════════════════════════════════════════════════
+
+SUMMARY: 21 FILES TOTAL
+  • 3 Entry points (run_*.py)
+  • 4 Core training (train_sequence.py, trainloop.py, trainloop_gpu_finetuned.py, test_sequence.py)
+  • 6 Model architecture (loss_function.py, qwen_hybrid_prompt.py, revthink_orchestrator.py, tta.py, solver1.py, solver2.py)
+  • 4 Data & features (dataset_arc.py, feature_extraction.py, feature_registry.py, operators.yaml)
+  • 3 Alternative losses (optional)
+  • 1 Utility/benchmarking
+
+💾 Configuration stored in: 6 locations (hardcoded, functions, dataclasses, CLI, env vars, YAML)
+
+📊 Total configurable parameters: 50+
+
+🚀 READY TO TRAIN!

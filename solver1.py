@@ -12,18 +12,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
-from collections import deque
+from collections import deque, defaultdict
 import math
+import hashlib
 
 from loss_function import ARCPromptGuidedAgent
 from tta import SurpriseBasedMemory, MetaAdapter
 
 class ContextualMemoryBank(nn.Module):
     """
-    Fast contextual memory with surprise-based updates.
+    Fast contextual memory with surprise-based updates and pattern storage.
     Stores recent problem-solving episodes with temporal decay.
+    NEW: Enhanced with pattern classification and surprise-gated memory writes.
     """
-    
+
     def __init__(self,
                  context_size: int = 50,  # Smaller than permanent memory
                  feature_dim: int = 512,
@@ -31,13 +33,13 @@ class ContextualMemoryBank(nn.Module):
                  temporal_decay: float = 0.9,
                  attention_heads: int = 8):
         super().__init__()
-        
+
         self.context_size = context_size
         self.feature_dim = feature_dim
         self.surprise_threshold = surprise_threshold
         self.temporal_decay = temporal_decay
         self.attention_heads = attention_heads
-        
+
         # Contextual memory buffers
         self.register_buffer('context_keys', torch.zeros(context_size, feature_dim))
         self.register_buffer('context_values', torch.zeros(context_size, feature_dim))
@@ -46,6 +48,15 @@ class ContextualMemoryBank(nn.Module):
         self.register_buffer('context_success', torch.zeros(context_size))  # Track success rate
         self.register_buffer('context_occupied', torch.zeros(context_size, dtype=torch.bool))
         self.register_buffer('write_pointer', torch.tensor(0, dtype=torch.long))
+
+        # NEW: Pattern storage for known solutions
+        self.known_patterns = {}  # Maps pattern hash to solution
+        self.pattern_frequencies = defaultdict(int)  # Track pattern frequency
+        self.pattern_success_rates = defaultdict(float)  # Track success rates per pattern
+
+        # NEW: Pattern grouping and clustering
+        self.pattern_groups = defaultdict(list)  # Group similar patterns by transformation type
+        self.pattern_embedding_cache = {}  # Cache pattern embeddings for similarity
         
         # Memory encoding/decoding
         self.key_encoder = nn.Sequential(
@@ -74,24 +85,210 @@ class ContextualMemoryBank(nn.Module):
             nn.Linear(128, 1),
             nn.Sigmoid()
         )
-        
+
+    def _compute_pattern_hash(self, grid: torch.Tensor) -> str:
+        """Compute deterministic hash of grid pattern."""
+        grid_np = grid.cpu().numpy().flatten().tobytes()
+        return hashlib.md5(grid_np).hexdigest()
+
+    def store_known_pattern(self, input_grid: torch.Tensor, output_grid: torch.Tensor, success: bool):
+        """
+        Store a known pattern (input -> output mapping) for future retrieval.
+        NEW: Also groups pattern with similar ones for surprise mitigation.
+        """
+        pattern_hash = self._compute_pattern_hash(input_grid)
+
+        self.known_patterns[pattern_hash] = {
+            'input': input_grid.cpu().clone().detach(),
+            'output': output_grid.cpu().clone().detach(),
+            'success': bool(success),
+            'timestamp': len(self.known_patterns)
+        }
+
+        # Update frequency and success tracking
+        self.pattern_frequencies[pattern_hash] += 1
+        if success:
+            old_rate = self.pattern_success_rates.get(pattern_hash, 0.0)
+            freq = self.pattern_frequencies[pattern_hash]
+            # Exponential moving average update
+            new_rate = (old_rate * (freq - 1) + float(success)) / freq
+            self.pattern_success_rates[pattern_hash] = new_rate
+
+        # NEW: Group pattern with similar patterns
+        self._group_pattern(pattern_hash, input_grid, output_grid)
+
+    def retrieve_known_pattern(self, input_grid: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Retrieve exact match for known pattern, prioritizing high-success ones.
+        Returns output grid if found and successful, None otherwise.
+        """
+        pattern_hash = self._compute_pattern_hash(input_grid)
+
+        if pattern_hash in self.known_patterns:
+            pattern_info = self.known_patterns[pattern_hash]
+            if pattern_info['success']:
+                return pattern_info['output'].to(input_grid.device)
+
+        return None
+
+    def get_pattern_statistics(self) -> Dict[str, Any]:
+        """Get statistics on stored patterns."""
+        return {
+            'total_patterns': len(self.known_patterns),
+            'total_retrievals': sum(self.pattern_frequencies.values()),
+            'avg_success_rate': np.mean(list(self.pattern_success_rates.values())) if self.pattern_success_rates else 0.0,
+            'num_groups': len(self.pattern_groups),
+            'frequent_patterns': sorted(
+                [(k, self.pattern_frequencies[k]) for k in self.pattern_frequencies.keys()],
+                key=lambda x: x[1], reverse=True
+            )[:5]
+        }
+
+    def _compute_pattern_similarity(self, grid1: torch.Tensor, grid2: torch.Tensor) -> float:
+        """
+        Compute similarity between two grids for pattern grouping.
+        NEW: Uses shape, color distribution, and transformation properties.
+        """
+        if grid1.shape != grid2.shape:
+            return 0.0
+
+        # Shape similarity (exact match)
+        shape_sim = 1.0 if grid1.shape == grid2.shape else 0.5
+
+        # Color distribution similarity
+        colors1 = set(grid1.flatten().tolist())
+        colors2 = set(grid2.flatten().tolist())
+        intersection = len(colors1.intersection(colors2))
+        union = len(colors1.union(colors2))
+        color_sim = intersection / (union + 1e-8)
+
+        # Structural similarity (do neighboring cells match?)
+        if grid1.numel() > 1:
+            diff = (grid1 != grid2).float()
+            # Penalize scattered differences
+            local_diff = F.max_pool2d(diff.unsqueeze(0).unsqueeze(0),
+                                     kernel_size=3, stride=1, padding=1)
+            structure_sim = 1.0 - local_diff.mean().item()
+        else:
+            structure_sim = 1.0
+
+        # Weighted combination
+        total_sim = 0.5 * shape_sim + 0.3 * color_sim + 0.2 * structure_sim
+        return float(total_sim)
+
+    def _group_pattern(self, pattern_hash: str, input_grid: torch.Tensor, output_grid: torch.Tensor):
+        """
+        Group pattern with similar patterns for surprise mitigation.
+        NEW: Clusters patterns by transformation similarity.
+        """
+        # Find most similar existing group
+        best_group_key = None
+        best_similarity = 0.5  # Threshold for grouping
+
+        for group_key in list(self.pattern_groups.keys()):
+            if group_key in self.known_patterns:
+                group_input = self.known_patterns[group_key]['input']
+                similarity = self._compute_pattern_similarity(input_grid, group_input)
+
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_group_key = group_key
+
+        # Add to best group or create new group
+        if best_group_key is None:
+            # Create new group with this pattern as representative
+            self.pattern_groups[pattern_hash] = [pattern_hash]
+        else:
+            # Add to existing group
+            self.pattern_groups[best_group_key].append(pattern_hash)
+
+    def retrieve_similar_patterns(self, input_grid: torch.Tensor, k: int = 3) -> List[Dict]:
+        """
+        NEW: Retrieve similar patterns from the same group for surprise mitigation.
+        When facing a similar pattern, the model can use prior successful solutions.
+        """
+        similar_patterns = []
+
+        # Find best matching group
+        best_group_key = None
+        best_similarity = 0.0
+
+        for group_key in self.pattern_groups.keys():
+            if group_key in self.known_patterns:
+                group_input = self.known_patterns[group_key]['input']
+                similarity = self._compute_pattern_similarity(input_grid, group_input)
+
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_group_key = group_key
+
+        # Retrieve top-k from best group
+        if best_group_key is not None:
+            group_patterns = self.pattern_groups[best_group_key][:k]
+
+            for pattern_hash in group_patterns:
+                if pattern_hash in self.known_patterns:
+                    pattern_info = self.known_patterns[pattern_hash]
+                    similar_patterns.append({
+                        'input': pattern_info['input'],
+                        'output': pattern_info['output'],
+                        'similarity': best_similarity,
+                        'success_rate': self.pattern_success_rates.get(pattern_hash, 0.0)
+                    })
+
+        return similar_patterns
+
     def compute_contextual_surprise(self,
                                    query_features: torch.Tensor,
-                                   gradient_magnitude: torch.Tensor) -> torch.Tensor:
+                                   gradient_magnitude: torch.Tensor,
+                                   input_grid: Optional[torch.Tensor] = None,
+                                   output_grid: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Compute surprise score based on novelty and gradient magnitude.
-        Properly handles gradient flow and prevents unbounded scaling.
+        Compute surprise score based on novelty, gradient magnitude, and pattern recognition.
+        NEW: Detects large input-output differences as HIGH SURPRISE - requires focused work.
 
         Args:
             query_features: [B, D] - Current problem features
             gradient_magnitude: [B] - Gradient magnitude from loss (should be detached)
+            input_grid: [H, W] - Optional input grid for pattern-based surprise
+            output_grid: [H, W] - Optional output grid to detect LARGE DIFFERENCES
 
         Returns:
             surprise: [B] - Contextual surprise scores [0, 1]
         """
+        # NEW: Compute grid difference surprise (large changes = high surprise)
+        grid_difference_surprise = torch.tensor(0.0, device=gradient_magnitude.device)
+        if input_grid is not None and output_grid is not None:
+            # Compute pixel-level difference ratio
+            pixel_diff = (input_grid != output_grid).float().sum()
+            total_pixels = input_grid.numel()
+            diff_ratio = pixel_diff / (total_pixels + 1e-8)
+
+            # Large differences (>30% of pixels) = HIGH SURPRISE
+            # Small differences (<10% of pixels) = LOW SURPRISE
+            if diff_ratio > 0.3:
+                grid_difference_surprise = 0.9  # High surprise - needs focused work
+            elif diff_ratio > 0.1:
+                grid_difference_surprise = 0.6  # Medium surprise
+            else:
+                grid_difference_surprise = 0.2  # Low surprise - mostly preserved
+
         if not self.context_occupied.any():
-            # No context yet, everything is surprising
-            return torch.ones_like(gradient_magnitude) * 0.8
+            # No context yet, everything is surprising (but check patterns first)
+            base_surprise = torch.ones_like(gradient_magnitude) * 0.8
+
+            # NEW: Increase surprise significantly if large input-output differences
+            if grid_difference_surprise > 0.5:
+                base_surprise = base_surprise + (grid_difference_surprise * 0.3)  # Boost surprise
+
+            # NEW: Reduce surprise if this is a known pattern
+            if input_grid is not None:
+                known_output = self.retrieve_known_pattern(input_grid)
+                if known_output is not None:
+                    # Known pattern with high success = low surprise
+                    base_surprise = base_surprise * 0.3
+
+            return torch.clamp(base_surprise, 0, 1.0)
 
         # Get active memories with temporal weighting
         active_mask = self.context_occupied
@@ -109,6 +306,8 @@ class ContextualMemoryBank(nn.Module):
 
         # Compute novelty for each query
         novelty_scores = []
+        pattern_surprises = []  # NEW: Track pattern-based surprises
+
         for i, query in enumerate(query_features):
             # Distance to all memories
             distances = torch.norm(query.unsqueeze(0) - active_keys, dim=1)  # [M]
@@ -127,14 +326,32 @@ class ContextualMemoryBank(nn.Module):
             novelty = 1.0 - min_weighted if len(weighted_distances) > 0 else torch.tensor(1.0, device=device)
             novelty_scores.append(novelty)
 
+            # NEW: Pattern-based surprise (known patterns have lower surprise)
+            pattern_surprise = 0.7  # Default: somewhat surprising
+            if input_grid is not None and i == 0:  # Assuming single sample for pattern check
+                known_output = self.retrieve_known_pattern(input_grid)
+                if known_output is not None:
+                    # Known pattern with proven success = low surprise
+                    pattern_success_rate = self.pattern_success_rates.get(
+                        self._compute_pattern_hash(input_grid), 0.0
+                    )
+                    pattern_surprise = (1.0 - pattern_success_rate) * 0.3  # Range: [0, 0.3]
+
+            pattern_surprises.append(pattern_surprise)
+
         novelty_tensor = torch.stack(novelty_scores)
+        pattern_surprise_tensor = torch.tensor(pattern_surprises, device=device)
 
         # Combine novelty with gradient magnitude with clamping
         # Ensure gradient_magnitude is detached (shouldn't propagate through memory)
         grad_mag_detached = gradient_magnitude.detach() if gradient_magnitude.requires_grad else gradient_magnitude
         grad_mag_normalized = torch.clamp(grad_mag_detached, 0, 1.0)  # Normalize gradients
 
+        # NEW: Combine novelty-based, pattern-based, and grid-difference surprises
         surprise = grad_mag_normalized * novelty_tensor
+        # Weight: 50% novelty*gradient, 25% pattern knowledge, 25% grid difference
+        surprise = (0.5 * surprise + 0.25 * pattern_surprise_tensor +
+                   0.25 * grid_difference_surprise)  # Grid difference boost
         surprise = torch.clamp(surprise, 0, 1.0)  # Surprise in [0, 1]
 
         return surprise
@@ -488,7 +705,12 @@ class ContextualSolver(nn.Module):
             torch.tensor([final_success]),
             torch.tensor([float(self.contextual_memory.write_pointer.item())])
         )
-        
+
+        # NEW: Store known pattern for future retrieval
+        self.contextual_memory.store_known_pattern(
+            input_grid, final_prediction, final_success > 0.8
+        )
+
         # Apply temporal decay
         self.contextual_memory.decay_memories()
         

@@ -222,7 +222,7 @@ class PromptCache:
 # ----------------------------
 @dataclass
 class QwenCfg:
-    model_name: str = "Qwen/Qwen2.5-1.8B"
+    model_name: str = "Qwen/Qwen2.5-1.5B"
     dtype: str = "float16"      
     max_new_tokens: int = 96
     temperature: float = 0.0        
@@ -275,6 +275,13 @@ class QwenHybridPrompt(nn.Module):
             self.embedder = AutoModel.from_pretrained(
                 name, torch_dtype=dtype, device_map="auto", cache_dir=cache_dir
             )
+
+            # UNFREEZE QWEN: Make all parameters trainable
+            for param in self.lm.parameters():
+                param.requires_grad = True
+            for param in self.embedder.parameters():
+                param.requires_grad = True
+
             self.max_new = int(qwen.max_new_tokens)
             self.temp = float(qwen.temperature)
             self.top_p = float(qwen.top_p)

@@ -24,7 +24,7 @@ def make_agent(device="cuda"):
     return agent
 
 def make_qwen(device="cuda"):
-    qcfg = QwenCfg(model_name="Qwen/Qwen2.5-1.8B", dtype="float16", temperature=0.0, use_qwen=True)
+    qcfg = QwenCfg(model_name="Qwen/Qwen2.5-1.5B", dtype="float16", temperature=0.0, use_qwen=True)
     qwen = QwenHybridPrompt(prompt_dim=256, numeric_in_dim=15, fuse="mean", qwen=qcfg).to(device)
     return qwen
 

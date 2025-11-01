@@ -19,13 +19,16 @@ class RevThinkOrchestrator:
 
     @staticmethod
     def make_issue_report(losses: Dict[str, float], stats: Dict[str, float]) -> Dict[str, Any]:
-        keys = ['risk','consistency','bidirectional','ambiguity','total',
+        # NEW: Include reversibility in issue report for bidirectional feedback
+        keys = ['risk','consistency','bidirectional','ambiguity','reversibility','total',
                 'critique_consistency','tta_consistency','solver_likelihood']
         return {k: float(losses.get(k, stats.get(k, 0.0))) for k in keys}
 
     def revthink_score(self, losses: Dict[str,float]) -> float:
-        w = {'risk':0.2,'consistency':0.2,'bidirectional':0.2,'ambiguity':0.1,
-             'critique_consistency':0.15,'tta_consistency':0.1,'solver_likelihood':-0.15}
+        # NEW: Weights now include reversibility (bidirectional feedback)
+        # reversibility is CRITICAL - high weight means prompt needs updating if transformation isn't invertible
+        w = {'risk':0.15,'consistency':0.2,'bidirectional':0.15,'reversibility':0.25,
+             'ambiguity':0.1,'critique_consistency':0.1,'tta_consistency':0.05,'solver_likelihood':-0.1}
         s = sum(w[k]*float(losses.get(k,0.0)) for k in w)
 
         return max(0.0, min(1.0, s))

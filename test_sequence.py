@@ -170,7 +170,7 @@ def pack_transform_record(inp: torch.Tensor, out: Optional[torch.Tensor]) -> Dic
 def make_qwen(device: str) -> QwenHybridPrompt:
     """Create Qwen prompt generator"""
     qcfg = QwenCfg(
-        model_name="Qwen/Qwen2.5-1.8B",
+        model_name="Qwen/Qwen2.5-1.5B",
         dtype="float16",
         temperature=0.0,
         use_qwen=True

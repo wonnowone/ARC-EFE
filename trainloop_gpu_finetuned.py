@@ -24,12 +24,13 @@ logging.getLogger('transformers.modeling_utils').setLevel(logging.ERROR)
 
 from dataset_arc import ARCDataset
 from qwen_hybrid_prompt import QwenHybridPrompt, QwenCfg
+from loss_function import EFELoss, ARCPromptGuidedAgent  # NEW: Added EFELoss import
+from priority_efe_loss import PriorityEFELoss  # 업로드한 파일
 from revthink_orchestrator import RevThinkOrchestrator, RevThinkCfg
 from feature_registry import FeatureRegistry, apply_operator_config
 from feature_extraction import extract_transformation_features, classify_transformation_type
 from grid_accuracy_loss import GridAccuracyLoss, ARCPromptGuidedAgentGPU
 from solver2 import PermanentSolver
-from loss_function import EFELoss
 import torch.nn.functional as F
 
 

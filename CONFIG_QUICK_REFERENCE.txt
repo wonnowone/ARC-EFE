@@ -1,0 +1,332 @@
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                    TRAINING PIPELINE - FILES AND CONFIG QUICK REFERENCE           ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+
+ENTRY POINTS (Choose One)
+═════════════════════════════════════════════════════════════════════════════════
+
+1. run_main.py
+   └─ Full pipeline (train + test + report)
+   └─ Entry: main()
+   └─ Output: runs/arc_full_run_YYYYMMDD_HHMMSS/
+
+2. run_gpu_finetuned.py
+   └─ GPU-optimized training
+   └─ Entry: main() in trainloop_gpu_finetuned.py
+   └─ Output: runs/arc_gpu_finetuned_YYYYMMDD_HHMMSS/
+
+3. run_cpu_simple.py
+   └─ CPU-only training
+   └─ Entry: main() in trainloop.py
+   └─ Output: runs/arc_cpu_YYYYMMDD_HHMMSS/
+
+
+CORE TRAINING FILES (7 Files)
+═════════════════════════════════════════════════════════════════════════════════
+
+Execution & Orchestration:
+  ├─ run_main.py                    PipelineConfig
+  ├─ run_gpu_finetuned.py           Wrapper for trainloop_gpu_finetuned
+  ├─ run_cpu_simple.py              Wrapper for trainloop
+  ├─ train_sequence.py              Main training loop (TrainingConfig, TrainingLogger)
+  ├─ trainloop.py                   Single epoch training
+  ├─ trainloop_gpu_finetuned.py     GPU training + Qwen fine-tuning (MAIN LOOP)
+  └─ test_sequence.py               Testing/evaluation
+
+
+MODEL ARCHITECTURE FILES (6 Files)
+═════════════════════════════════════════════════════════════════════════════════
+
+Core Models:
+  ├─ loss_function.py               EFELoss, EFELossConfig, ARCPromptGuidedAgent
+  ├─ qwen_hybrid_prompt.py          QwenHybridPrompt, QwenCfg
+  ├─ revthink_orchestrator.py       RevThinkOrchestrator, RevThinkCfg
+  ├─ tta.py                         TestTimeAdaptationSystem, SurpriseBasedMemory
+  ├─ solver1.py                     ContextualMemoryBank, ContextualSolver
+  └─ solver2.py                     PermanentMemoryBank, PermanentSolver
+
+
+DATA & FEATURE FILES (4 Files)
+═════════════════════════════════════════════════════════════════════════════════
+
+Data Processing:
+  ├─ dataset_arc.py                 ARCDataset (loads JSON, splits data)
+  ├─ feature_extraction.py          extract_transformation_features() [15-dim]
+  ├─ feature_registry.py            FeatureRegistry (operator management)
+  └─ configs/operators.yaml         Feature operator configuration
+
+
+ALTERNATIVE LOSS FILES (3 Files - Optional)
+═════════════════════════════════════════════════════════════════════════════════
+
+  ├─ grid_accuracy_loss.py          Alternative: Grid accuracy focused
+  ├─ grid_transformation_loss.py    Alternative: Transformation focused
+  └─ priority_efe_loss.py           Alternative: Priority-based
+
+
+UTILITY FILES (1 File)
+═════════════════════════════════════════════════════════════════════════════════
+
+  └─ measure_throughput.py          Performance benchmarking
+
+
+═════════════════════════════════════════════════════════════════════════════════
+
+CONFIGURATION LOCATIONS (WHERE TO CHANGE SETTINGS)
+═════════════════════════════════════════════════════════════════════════════════
+
+HARDCODED CONSTANTS (6 Parameters)
+  File: train_sequence.py (Lines 23-29)
+  └─ TTA_EVAL_INTERVAL = 50
+  └─ CHECKPOINT_INTERVAL = 100
+  └─ GRAD_CLIP_NORM = 1.0
+  └─ LEARNING_RATE = 1e-3
+  └─ EPOCHS = 5
+  └─ BATCH_SIZE = 1
+
+
+FUNCTION DEFAULTS - trainloop_gpu_finetuned.py (14 Parameters)
+  Location: Lines 505-509, main() function
+
+  Training:
+    ├─ epochs=10
+    ├─ agent_lr=1e-5
+    ├─ qwen_lr=None
+    ├─ weight_decay=1e-6
+    ├─ grad_accum_steps=1
+    ├─ grad_clip=1.0
+    ├─ warmup_steps=100
+
+  Checkpointing:
+    ├─ save_frequency=1
+
+  Evaluation:
+    ├─ max_batches_per_epoch=None
+    ├─ val_frequency=1
+    └─ skip_test=False
+
+  System:
+    ├─ device="cuda"
+    ├─ seed=42
+    └─ model_name=None
+
+  🆕 Model Control:
+    └─ freeze_qwen=True  ← NEW: Set to False to train Qwen!
+
+
+LOSS WEIGHTS - EFELossConfig (11 Parameters)
+  File: loss_function.py (Lines 25-88)
+  Class: @dataclass EFELossConfig
+
+  Lambda Weights:
+    ├─ lambda_risk = 1.0              Risk/preference matching
+    ├─ lambda_amb = 0.0               Ambiguity reduction
+    ├─ lambda_step = 0.1              Step penalty
+    ├─ lambda_cons = 1.0              Consistency (GRID MATCHING PRIMARY)
+    ├─ lambda_bi = 0.5                Bidirectional agreement
+    ├─ lambda_z = 0.2                 Z-learning anchoring
+    ├─ lambda_prompt = 0.3            Prompt influence
+    ├─ lambda_grid_norm = 0.1         Grid size fairness
+    └─ lambda_reversibility = 0.4     Reversibility check (NEW)
+
+  Grid Params:
+    ├─ max_grid_size = 30
+    ├─ num_colors = 10
+    └─ prompt_dim = 256
+
+  Advanced:
+    ├─ inference_first_threshold = 0.7
+    └─ ema_decay = 0.99
+
+  🆕 Pre-configured Profiles:
+    ├─ EFELossConfig.aggressive_grid_matching()
+    ├─ EFELossConfig.reversibility_focus()
+    └─ EFELossConfig.balanced()
+
+
+QWEN CONFIGURATION - QwenCfg (5 Parameters)
+  File: qwen_hybrid_prompt.py (Lines 224-240)
+  Class: QwenCfg
+
+    ├─ model_name = "Qwen/Qwen2.5-1.8B"
+    ├─ dtype = "float16"
+    ├─ max_new_tokens = 96
+    ├─ temperature = 0.0              (Deterministic)
+    └─ top_p = 0.9
+
+
+REVTHINK CONFIGURATION - RevThinkCfg (6 Parameters)
+  File: revthink_orchestrator.py (Lines 7-13)
+  Class: @dataclass RevThinkCfg
+
+    ├─ tau = 0.45                    Revision trigger threshold
+    ├─ alpha = 2.0                   Gate sharpness
+    ├─ beta = 0.3                    Gate bias
+    ├─ gamma = 0.5                   Lambda prompt boost (prompts updated with gamma)
+    ├─ eta = 0.2                     Z-anchoring blend
+    └─ mask_weight = 0.5
+
+
+PIPELINE CONFIGURATION - PipelineConfig (9 Parameters)
+  File: run_main.py (Lines 18-48)
+  Class: PipelineConfig
+
+  Training:
+    ├─ train_epochs = 5
+    ├─ train_batch_size = 1
+    ├─ train_lr = 1e-3
+    ├─ train_grad_clip = 1.0
+    ├─ train_tta_eval_interval = 50
+    └─ train_checkpoint_interval = 100
+
+  Testing:
+    ├─ test_on_train_split = False
+    ├─ test_on_test_split = True
+    ├─ use_tta = True
+    └─ tta_steps = 5
+
+  Reporting:
+    └─ generate_report = True
+
+
+TTA CONFIGURATION (4 Parameters)
+  File: tta.py (Lines 33-48)
+  Class: TestTimeAdaptationSystem.__init__()
+
+    ├─ memory_size = 1000
+    ├─ surprise_threshold = 0.65
+    ├─ adaptation_steps = 5
+    └─ adaptation_lr = 1e-3
+
+
+SOLVER1 CONFIGURATION (3 Parameters)
+  File: solver1.py (Lines 28-40)
+  Class: ContextualMemoryBank.__init__()
+
+    ├─ context_size = 50
+    ├─ surprise_threshold = 0.2
+    └─ temporal_decay = 0.9
+
+
+SOLVER2 CONFIGURATION (2 Parameters)
+  File: solver2.py (Lines 161-172)
+  Class: PermanentMemoryBank.__init__()
+
+    ├─ max_memories = 10000
+    └─ DBSCAN eps = 0.3  (in clusterer definition)
+
+
+ENVIRONMENT VARIABLE (1 Parameter)
+  Location: trainloop_gpu_finetuned.py (Line 546)
+
+    └─ ARC_DATA_DIR       (Path to data, defaults to ".")
+
+
+FEATURE CONFIG (External YAML)
+  File: configs/operators.yaml
+  └─ Custom feature operators
+
+
+═════════════════════════════════════════════════════════════════════════════════
+
+HOW TO CHANGE CONFIGURATION
+═════════════════════════════════════════════════════════════════════════════════
+
+METHOD 1: Command Line Arguments (EASIEST)
+────────────────────────────────────────
+  python run_gpu_finetuned.py \
+    --epochs 20 \
+    --agent_lr 5e-5 \
+    --freeze_qwen False \
+    --weight_decay 1e-5
+
+
+METHOD 2: Use Config Profiles (RECOMMENDED for Loss)
+─────────────────────────────────────────────────
+  from loss_function import EFELossConfig, EFELoss
+
+  # Aggressive grid matching (4× boost on consistency)
+  cfg = EFELossConfig.aggressive_grid_matching()
+  efe_loss = EFELoss(**cfg.to_dict())
+
+  # Reversibility focus (maximize invertibility check)
+  cfg = EFELossConfig.reversibility_focus()
+  efe_loss = EFELoss(**cfg.to_dict())
+
+  # Balanced (default)
+  cfg = EFELossConfig.balanced()
+  efe_loss = EFELoss(**cfg.to_dict())
+
+
+METHOD 3: Edit Function Defaults (Permanent Change)
+──────────────────────────────────────────────────
+  File: trainloop_gpu_finetuned.py (Lines 505-509)
+
+  Change:
+    def main(epochs=10, agent_lr=1e-5, freeze_qwen=True, ...):
+  To:
+    def main(epochs=20, agent_lr=5e-5, freeze_qwen=False, ...):
+
+
+METHOD 4: Direct Class Instantiation
+────────────────────────────────────
+  from loss_function import EFELossConfig, EFELoss
+
+  cfg = EFELossConfig()
+  cfg.lambda_cons = 2.0      # Double grid matching
+  cfg.lambda_bi = 0.3        # Reduce bidirectional
+  cfg.freeze_qwen = False    # Train Qwen
+
+  efe_loss = EFELoss(**cfg.to_dict())
+
+
+═════════════════════════════════════════════════════════════════════════════════
+
+TOTAL CONFIGURATION SUMMARY
+═════════════════════════════════════════════════════════════════════════════════
+
+Total Files Used in Training:         21
+  ├─ Core execution:                  7
+  ├─ Model architecture:              6
+  ├─ Data & features:                 4
+  └─ Utilities/alternatives:          4
+
+Total Configurable Parameters:        50+
+  ├─ Loss weights:                    11
+  ├─ Training hyperparameters:        14
+  ├─ Model configurations:            13
+  ├─ TTA/Solver settings:             9
+  └─ Environment/system:              3
+
+Configuration Sources:                6
+  ├─ Hardcoded constants
+  ├─ Function defaults
+  ├─ Dataclass defaults
+  ├─ Command line arguments
+  ├─ Environment variables
+  └─ External YAML file
+
+
+KEY PARAMETERS TO ADJUST
+═════════════════════════════════════════════════════════════════════════════════
+
+For Better Grid Matching:
+  ✓ Use: EFELossConfig.aggressive_grid_matching()
+  ✓ Or: lambda_cons = 2.0 (double from 1.0)
+
+For Better Reversibility:
+  ✓ Use: EFELossConfig.reversibility_focus()
+  ✓ Or: lambda_reversibility = 0.8
+
+To Train Qwen:
+  ✓ Set: freeze_qwen = False
+  ✓ Or: python run_gpu_finetuned.py --freeze_qwen False
+
+To Monitor Training:
+  ✓ Check: runs/arc_gpu_finetuned_YYYYMMDD_HHMMSS/
+  ✓ Files: train_log.jsonl, metrics.jsonl, metrics_plot.png
+
+═════════════════════════════════════════════════════════════════════════════════
+
+🚀 READY TO TRAIN WITH FULL CONFIGURATION CONTROL!

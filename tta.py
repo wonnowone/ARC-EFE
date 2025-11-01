@@ -408,6 +408,147 @@ class TestTimeAdaptationSystem(nn.Module):
             
         return gradients
     
+    def train_time_adapt(self,
+                        initial_state: torch.Tensor,
+                        target_state: torch.Tensor,
+                        prompt_embedding: torch.Tensor,
+                        efe_loss_fn: Optional[nn.Module] = None,
+                        optimizer: Optional[torch.optim.Optimizer] = None) -> Dict[str, torch.Tensor]:
+        """
+        NEW: Perform TTA-style adaptation during training for improved generalization.
+        Uses surprise-based memory and adaptive components to enhance training.
+
+        Args:
+            initial_state: [H, W] - Input grid
+            target_state: [H, W] - Target grid
+            prompt_embedding: [D] - Encoded prompt
+            efe_loss_fn: Optional EFE loss function for training
+            optimizer: Optional optimizer for adapter updates
+
+        Returns:
+            adaptation_results: Dictionary with training metrics and adaptations
+        """
+        results = {}
+
+        # Extract problem features
+        problem_features = self.extract_problem_features(
+            initial_state, target_state, prompt_embedding
+        )
+        problem_features.requires_grad_(True)
+
+        # Route to appropriate solver
+        routing_weights = self.router(problem_features.unsqueeze(0))
+        selected_solver = routing_weights.argmax(dim=-1).item()
+        results['selected_solver'] = selected_solver
+
+        # Training adaptation loop with TTA
+        train_losses = []
+        tta_improvements = []
+
+        for step in range(self.adaptation_steps):
+            # Standard forward pass
+            adapted_prompt = self.agent_adapters['prompt_adapter'](prompt_embedding[:self.base_agent.prompt_dim])
+            forward_preds, critique_scores = self.base_agent.forward_planning(
+                initial_state, adapted_prompt, num_steps=3
+            )
+
+            # Compute EFE loss if available
+            if efe_loss_fn is not None and hasattr(efe_loss_fn, 'forward'):
+                backward_preds = self.base_agent.backward_planning(
+                    target_state, adapted_prompt, num_steps=3
+                )
+                state_preds = forward_preds
+                obs_probs = F.softmax(forward_preds, dim=-1)
+                final_pred = forward_preds[-1]
+
+                efe_losses = efe_loss_fn(
+                    forward_predictions=forward_preds,
+                    backward_predictions=backward_preds,
+                    state_predictions=state_preds,
+                    observation_probs=obs_probs,
+                    final_prediction=final_pred,
+                    target_outcome=target_state,
+                    episode_length=forward_preds.shape[0],
+                    prompt_embedding=prompt_embedding,
+                    grid_mask=None
+                )
+                train_loss = efe_losses['total']
+            else:
+                # Fallback to adaptation loss
+                train_loss = self._compute_adaptation_loss(
+                    forward_preds, critique_scores, selected_solver, problem_features
+                )
+
+            train_losses.append(train_loss.item())
+
+            # Compute surprise for TTA memory gating
+            gradients = self.compute_surprise_gradients(problem_features, train_loss)
+            surprise = self.memory.compute_surprise(
+                problem_features.unsqueeze(0), gradients.unsqueeze(0)
+            )
+
+            # Adapt parameters (including through optimizer if provided)
+            if optimizer is not None:
+                optimizer.zero_grad()
+                train_loss.backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+                optimizer.step()
+            else:
+                # Direct parameter adaptation
+                self._adapt_parameters(train_loss)
+
+            # Estimate TTA improvement by comparing loss before/after adaptation
+            with torch.no_grad():
+                adapted_prompt_eval = self.agent_adapters['prompt_adapter'](prompt_embedding[:self.base_agent.prompt_dim])
+                forward_preds_after, _ = self.base_agent.forward_planning(
+                    initial_state, adapted_prompt_eval, num_steps=3
+                )
+
+                if efe_loss_fn is not None:
+                    backward_preds_after = self.base_agent.backward_planning(
+                        target_state, adapted_prompt_eval, num_steps=3
+                    )
+                    efe_losses_after = efe_loss_fn(
+                        forward_predictions=forward_preds_after,
+                        backward_predictions=backward_preds_after,
+                        state_predictions=forward_preds_after,
+                        observation_probs=F.softmax(forward_preds_after, dim=-1),
+                        final_prediction=forward_preds_after[-1],
+                        target_outcome=target_state,
+                        episode_length=forward_preds_after.shape[0],
+                        prompt_embedding=prompt_embedding,
+                        grid_mask=None
+                    )
+                    loss_after = efe_losses_after['total'].item()
+                else:
+                    loss_after = self._compute_adaptation_loss(
+                        forward_preds_after, [], selected_solver, problem_features
+                    ).item()
+
+            tta_improvement = train_loss.item() - loss_after
+            tta_improvements.append(tta_improvement)
+
+            results[f'train_loss_step_{step}'] = train_loss.item()
+            results[f'surprise_step_{step}'] = surprise.item()
+            results[f'tta_improvement_step_{step}'] = tta_improvement
+
+        # Write to memory if surprising (high-loss/high-gradient cases)
+        final_surprise = self.memory.compute_surprise(
+            problem_features.unsqueeze(0), gradients.unsqueeze(0)
+        )
+        self.memory.write_memory(problem_features.unsqueeze(0), final_surprise)
+        self.memory.update_ages()
+
+        results.update({
+            'train_losses': train_losses,
+            'tta_improvements': tta_improvements,
+            'avg_tta_improvement': np.mean(tta_improvements) if tta_improvements else 0.0,
+            'final_surprise': final_surprise.item(),
+            'memory_size': self.memory.memory_occupied.sum().item()
+        })
+
+        return results
+
     def test_time_adapt(self,
                        initial_state: torch.Tensor,
                        target_state: torch.Tensor,

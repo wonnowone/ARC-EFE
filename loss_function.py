@@ -20,13 +20,79 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+
+@dataclass
+class EFELossConfig:
+    """
+    NEW: Hyperparameter configuration for EFE Loss.
+    Centralizes all tunable parameters for easy access and modification.
+    """
+    # Loss weights
+    lambda_risk: float = 1.0  # Risk/preference matching
+    lambda_amb: float = 0.0  # Ambiguity reduction (disabled by default)
+    lambda_step: float = 0.1  # Step penalty
+    lambda_cons: float = 1.0  # Consistency loss (important)
+    lambda_bi: float = 0.5  # Bidirectional agreement
+    lambda_z: float = 0.2  # Z-learning anchoring
+    lambda_prompt: float = 0.3  # Prompt consistency
+    lambda_grid_norm: float = 0.1  # Grid size normalization
+    lambda_reversibility: float = 0.4  # Reversibility check (40% of bidirectional)
+
+    # Grid parameters
+    max_grid_size: int = 30
+    num_colors: int = 10
+    prompt_dim: int = 256
+
+    # Advanced parameters
+    inference_first_threshold: float = 0.7  # Confidence for inference-first
+    ema_decay: float = 0.99  # EMA smoothing for preferences
+
+    def to_dict(self) -> Dict:
+        """Convert config to dictionary for logging"""
+        return {
+            'lambda_risk': self.lambda_risk,
+            'lambda_amb': self.lambda_amb,
+            'lambda_step': self.lambda_step,
+            'lambda_cons': self.lambda_cons,
+            'lambda_bi': self.lambda_bi,
+            'lambda_z': self.lambda_z,
+            'lambda_prompt': self.lambda_prompt,
+            'lambda_grid_norm': self.lambda_grid_norm,
+            'lambda_reversibility': self.lambda_reversibility,
+        }
+
+    @staticmethod
+    def aggressive_grid_matching() -> 'EFELossConfig':
+        """Configuration prioritizing grid matching above all else"""
+        cfg = EFELossConfig()
+        cfg.lambda_cons = 2.0  # Double the consistency loss
+        cfg.lambda_bi = 0.3  # Reduce bidirectional (less important)
+        cfg.lambda_step = 0.05  # Reduce step penalty
+        cfg.lambda_amb = 0.0  # Disable ambiguity
+        return cfg
+
+    @staticmethod
+    def reversibility_focus() -> 'EFELossConfig':
+        """Configuration prioritizing reversibility check"""
+        cfg = EFELossConfig()
+        cfg.lambda_reversibility = 0.8  # Heavy weight on reversibility
+        cfg.lambda_cons = 1.5  # Strong consistency
+        cfg.lambda_bi = 0.7  # Important for bidirectional
+        return cfg
+
+    @staticmethod
+    def balanced() -> 'EFELossConfig':
+        """Balanced configuration across all objectives"""
+        return EFELossConfig()
 
 class EFELoss(nn.Module):
     """
     Expected Free Energy Loss for ARC challenge planning.
-    Implements bi-directional planning with preference learning.
+    Implements bi-directional planning with preference learning, grid-aware normalization,
+    and inference-first risk assessment with movement estimation.
     """
-    
+
     def __init__(self,
                  lambda_risk: float = 1.0,
                  lambda_amb: float = 0.0,
@@ -35,6 +101,7 @@ class EFELoss(nn.Module):
                  lambda_bi: float = 0.5,
                  lambda_z: float = 0.2,
                  lambda_prompt: float = 0.3,
+                 lambda_grid_norm: float = 0.1,
                  max_grid_size: int = 30,
                  num_colors: int = 10,
                  prompt_dim: int = 256):
@@ -63,6 +130,7 @@ class EFELoss(nn.Module):
         self.lambda_bi = lambda_bi
         self.lambda_z = lambda_z
         self.lambda_prompt = lambda_prompt
+        self.lambda_grid_norm = lambda_grid_norm  # NEW: Grid size difference mitigation
 
         # ARC-specific parameters
         self.max_grid_size = max_grid_size
@@ -88,7 +156,125 @@ class EFELoss(nn.Module):
         # EMA parameters for Z-learning stability
         self.ema_decay = 0.99
         self.register_buffer('ema_success_rate', torch.tensor(0.5))  # Track recent success
-        
+
+        # NEW: Inference-first risk assessment and movement estimation
+        self.inference_first_threshold = 0.7  # Confidence threshold for inference-first
+        self.grid_match_history = {}  # Store one-to-one grid matches
+
+    def _estimate_grid_movements(self, forward_preds: torch.Tensor, backward_preds: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Estimate movement patterns by comparing forward and backward predictions.
+        Returns confidence scores and predicted movements for bidirectional checks.
+
+        Args:
+            forward_preds: [T, H, W, C] - Forward predictions
+            backward_preds: [T, H, W, C] - Backward predictions
+
+        Returns:
+            movement_confidence: [T, H, W] - Confidence of movement estimate
+            movement_vectors: [T, H, W, 2] - Estimated movement directions (dy, dx)
+        """
+        T, H, W, C = forward_preds.shape
+
+        # Compute probability distributions
+        forward_probs = F.softmax(forward_preds, dim=-1)
+        backward_probs = F.softmax(backward_preds, dim=-1)
+
+        # Compute entropy of predictions (low entropy = high confidence)
+        forward_entropy = -(forward_probs * torch.log(forward_probs + 1e-8)).sum(dim=-1)  # [T, H, W]
+        backward_entropy = -(backward_probs * torch.log(backward_probs + 1e-8)).sum(dim=-1)  # [T, H, W]
+
+        # Movement confidence is inverse of entropy (high confidence = low entropy)
+        movement_confidence = 1.0 / (1.0 + (forward_entropy + backward_entropy) / 2.0)
+
+        # Estimate movement by looking at color changes between steps
+        movement_vectors = torch.zeros(T, H, W, 2, device=forward_preds.device)
+
+        # For each position, estimate likely movement based on color distribution shift
+        for t in range(T - 1):
+            # Get argmax colors (most likely color at each position)
+            current_colors = forward_probs[t].argmax(dim=-1)  # [H, W]
+            next_colors = forward_probs[t + 1].argmax(dim=-1)  # [H, W]
+
+            # Compute local correlation for movement detection
+            for h in range(1, H - 1):
+                for w in range(1, W - 1):
+                    # Find where current color appears in neighborhood of next step
+                    color_match = (next_colors[h - 1:h + 2, w - 1:w + 2] == current_colors[h, w])
+                    if color_match.any():
+                        # Estimate displacement based on where color moved
+                        y_coords, x_coords = torch.where(color_match)
+                        if len(y_coords) > 0:
+                            avg_dy = (y_coords.float().mean() - 1.0)
+                            avg_dx = (x_coords.float().mean() - 1.0)
+                            movement_vectors[t, h, w] = torch.tensor([avg_dy, avg_dx], device=forward_preds.device)
+
+        return movement_confidence, movement_vectors
+
+    def _compute_inference_first_risk(self, forward_preds: torch.Tensor,
+                                      grid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute inference-first risk assessment based on prediction confidence.
+        Prioritizes high-confidence one-to-one grid matches before full inference.
+
+        Args:
+            forward_preds: [T, H, W, C] - Forward predictions
+            grid_mask: [H, W] - Binary mask for valid positions
+
+        Returns:
+            inference_risk: Scalar tensor representing risk of inference errors
+        """
+        T, H, W, C = forward_preds.shape
+
+        # Convert to probabilities
+        forward_probs = F.softmax(forward_preds, dim=-1)
+
+        # Get maximum probability for each position at each timestep
+        max_probs = forward_probs.max(dim=-1).values  # [T, H, W]
+
+        # Compute confidence per position (high = confident, can use inference-first)
+        position_confidence = max_probs.mean(dim=0)  # [H, W] - average over time
+
+        # Count positions with high confidence (inference-first candidates)
+        high_confidence_mask = position_confidence > self.inference_first_threshold
+
+        # Compute risk as fraction of low-confidence positions
+        if grid_mask is not None:
+            valid_positions = (grid_mask > 0).sum().float()
+            low_conf_positions = ((position_confidence <= self.inference_first_threshold) & (grid_mask > 0)).sum().float()
+        else:
+            valid_positions = float(H * W)
+            low_conf_positions = (position_confidence <= self.inference_first_threshold).sum().float()
+
+        inference_risk = low_conf_positions / (valid_positions + 1e-8)
+
+        return inference_risk
+
+    def _normalize_grid_size_difference(self, loss_value: torch.Tensor,
+                                        H: int, W: int) -> torch.Tensor:
+        """
+        Normalize loss by grid size to mitigate differences between varying grid sizes.
+        Uses adaptive scaling based on grid area.
+
+        Args:
+            loss_value: Scalar loss value
+            H, W: Grid dimensions
+
+        Returns:
+            Normalized loss value
+        """
+        grid_area = H * W
+        max_area = self.max_grid_size * self.max_grid_size
+
+        # Adaptive normalization: smaller grids get stronger penalties, larger get weaker
+        size_factor = (grid_area / max_area) ** 0.5
+
+        # Apply logarithmic damping for extreme size differences
+        log_factor = torch.log(torch.tensor(grid_area / max_area + 1.0, device=loss_value.device))
+
+        return loss_value / (size_factor * (1.0 + 0.1 * log_factor))
+
+
     def forward(self, 
                 forward_predictions: torch.Tensor,  # Q→(o_t) - forward predictions
                 backward_predictions: torch.Tensor,  # Q←(o_t) - backward predictions
@@ -137,26 +323,57 @@ class EFELoss(nn.Module):
             backward_predictions = backward_predictions.masked_fill(mask_expanded_3d == 0, -1e9)
             current_preference = current_preference.masked_fill(grid_mask.unsqueeze(-1) == 0, -1e9)
         
-        # 1. EFE Term: risk + expected ambiguity (Eq. A)
+        # NEW: Estimate grid movements for enhanced bidirectional checks
+        movement_confidence, movement_vectors = self._estimate_grid_movements(forward_predictions, backward_predictions)
+
+        # NEW: Compute inference-first risk assessment
+        inference_risk = self._compute_inference_first_risk(forward_predictions, grid_mask)
+        losses['inference_risk'] = inference_risk
+
+        # 1. EFE Term: risk + expected ambiguity (Eq. A) with inference-first adjustment
         risk_loss = self._compute_risk_loss(forward_predictions, current_preference, grid_mask)  # D_KL(Q→(o_t)||C)
+
+        # NEW: Weight risk by inference confidence (high confidence = lower weight)
+        inference_weight = 1.0 - inference_risk  # Higher inference confidence = less risk penalty
+        risk_loss = risk_loss * (0.5 + 0.5 * inference_weight)  # Range: [0.5, 1.0]
+
         ambiguity_loss = self._compute_ambiguity_loss(state_predictions, observation_probs, grid_mask)  # E_Q→(s_t)H(P(o_t|s_t))
         efe_term = self.lambda_risk * risk_loss + self.lambda_amb * ambiguity_loss
-        
+
         losses['risk'] = risk_loss
         losses['ambiguity'] = ambiguity_loss
         losses['efe'] = efe_term
-        
+
         # 2. step/risk budget: λ_step T (scaled by grid size for fairness)
         grid_scale = (H * W) / (self.max_grid_size * self.max_grid_size)
         step_penalty = self.lambda_step * T * grid_scale
+
+        # NEW: Apply grid size normalization
+        step_penalty = self._normalize_grid_size_difference(step_penalty, H, W)
         losses['step_penalty'] = step_penalty
-        
+
+        # NEW: Grid size difference mitigation loss
+        grid_norm_loss = torch.tensor(0.0, device=forward_predictions.device)
+        if self.lambda_grid_norm > 0:
+            # Penalize extreme size differences
+            size_ratio = (H * W) / (self.max_grid_size ** 2)
+            if size_ratio < 0.1 or size_ratio > 1.0:  # Too small or full-size
+                grid_norm_loss = torch.abs(torch.tensor(size_ratio) - 0.5)  # Target 50% of max size
+        losses['grid_norm'] = self.lambda_grid_norm * grid_norm_loss
+
+        # NEW: Grid matching accuracy - ONE-TO-ONE CORRESPONDENCE PRIORITY
+        grid_matching_loss = self._compute_grid_matching_loss(final_prediction, target_outcome, grid_mask)
+        losses['grid_matching'] = grid_matching_loss  # HIGH PRIORITY: No weight reduction, direct inclusion
+
         # 3. future-plan consistency: λ_cons CE(Q→(o_T), δ_o_T*)
         consistency_loss = self._compute_consistency_loss(final_prediction, target_outcome, grid_mask)
         losses['consistency'] = self.lambda_cons * consistency_loss
-        
+
         # 4. bi-directional agreement per step: λ_bi JS(Q→(o_t) || Q←(o_t))
-        bidirectional_loss = self._compute_bidirectional_loss(forward_predictions, backward_predictions, grid_mask)
+        # Enhanced with movement estimation
+        bidirectional_loss = self._compute_bidirectional_loss_with_movement(
+            forward_predictions, backward_predictions, movement_confidence, movement_vectors, grid_mask
+        )
         losses['bidirectional'] = self.lambda_bi * bidirectional_loss
         
         # 5. Z-learning anchoring: λ_Z D_KL(σ(c) || Ĉ)
@@ -171,11 +388,14 @@ class EFELoss(nn.Module):
             prompt_loss = self._compute_prompt_consistency_loss(forward_predictions, prompt_embedding)
         losses['prompt_consistency'] = self.lambda_prompt * prompt_loss
         
-        # Total Loss (Extended Equation 1)
-        total_loss = (efe_term + step_penalty + losses['consistency'] + 
-                     losses['bidirectional'] + losses['z_anchoring'] + losses['prompt_consistency'])
+        # Total Loss (Extended Equation 1 with grid matching priority)
+        # Grid matching is the PRIMARY objective - included at full weight
+        total_loss = (losses['grid_matching'] +  # PRIMARY: Grid one-to-one correspondence
+                     efe_term + step_penalty + losses['consistency'] +
+                     losses['bidirectional'] + losses['z_anchoring'] + losses['prompt_consistency'] +
+                     losses['grid_norm'])  # Grid size normalization
         losses['total'] = total_loss
-        
+
         return losses
     
     def _get_preference_distribution(self, H: int, W: int, prompt_embedding: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -313,6 +533,49 @@ class EFELoss(nn.Module):
             grid_size = states.shape[1] * states.shape[2]
             return total_entropy / max(grid_size, 1)
     
+    def _compute_grid_matching_loss(self, final_pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        NEW: Grid matching loss - measures one-to-one correspondence between predicted and target grids.
+        This is the PRIMARY objective: get the grid RIGHT.
+
+        Args:
+            final_pred: [H, W, C] - Logits of predicted grid
+            target: [H, W] - Integer indices of target grid
+            mask: [H, W] - Optional mask for valid positions
+
+        Returns:
+            matching_loss: Scalar loss (NOT weighted, high priority)
+        """
+        # Cross-entropy loss ensures one-to-one correspondence
+        if target.dtype == torch.long:
+            if mask is not None:
+                ignore_index = -100
+                tgt = target.clone()
+                tgt[mask == 0] = ignore_index
+                matching_loss = F.cross_entropy(
+                    final_pred.view(-1, final_pred.size(-1)),
+                    tgt.view(-1),
+                    ignore_index=ignore_index,
+                    reduction='mean'
+                )
+            else:
+                matching_loss = F.cross_entropy(
+                    final_pred.view(-1, final_pred.size(-1)),
+                    target.view(-1),
+                    reduction='mean'
+                )
+        else:
+            # Probability target: use KL divergence
+            logp = F.log_softmax(final_pred, dim=-1)
+            if mask is not None:
+                w = mask.float().unsqueeze(-1)
+                kl_loss = F.kl_div(logp, target, reduction='none').sum(dim=-1)
+                matching_loss = (kl_loss * mask).sum() / (mask.sum() + 1e-8)
+            else:
+                matching_loss = F.kl_div(logp, target, reduction='batchmean')
+
+        return matching_loss
+
     def _compute_consistency_loss(self, final_pred, target, mask=None):
         """
         Compute consistency loss: λ_cons CE(Q→(o_T), δ_o_T*)
@@ -351,6 +614,62 @@ class EFELoss(nn.Module):
                 return F.kl_div(logp, target, reduction='batchmean')
 
     
+    def _compute_bidirectional_loss_with_movement(self,
+                                                  forward_pred: torch.Tensor,
+                                                  backward_pred: torch.Tensor,
+                                                  movement_confidence: torch.Tensor,
+                                                  movement_vectors: torch.Tensor,
+                                                  mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute bi-directional loss with movement estimation.
+        Uses movement vectors to validate consistency between forward and backward planning.
+
+        Args:
+            forward_pred: [T, H, W, C] - Forward predictions
+            backward_pred: [T, H, W, C] - Backward predictions
+            movement_confidence: [T, H, W] - Confidence scores for movement estimates
+            movement_vectors: [T, H, W, 2] - Estimated movements (dy, dx)
+            mask: [H, W] - Optional grid mask
+
+        Returns:
+            Bidirectional loss with movement validation
+        """
+        # First compute basic bidirectional loss
+        basic_bi_loss = self._compute_bidirectional_loss(forward_pred, backward_pred, mask)
+
+        # Now add movement-based validation: movements should be reversible
+        T, H, W, C = forward_pred.shape
+
+        # For each timestep, check if movements are reversible (forward + backward ~ 0)
+        reversibility_loss = torch.tensor(0.0, device=forward_pred.device)
+
+        for t in range(min(T - 1, len(movement_vectors) - 1)):
+            # Forward movement at time t
+            fwd_move = movement_vectors[t]  # [H, W, 2]
+
+            # Backward movement should be roughly opposite
+            bwd_move = movement_vectors[T - 1 - t] if (T - 1 - t) < len(movement_vectors) else torch.zeros_like(fwd_move)
+
+            # Compute reversibility: (fwd + bwd) should be close to zero
+            combined_move = fwd_move + bwd_move  # [H, W, 2]
+            movement_magnitude = torch.norm(combined_move, dim=-1)  # [H, W]
+
+            # Weight by movement confidence
+            confidence = movement_confidence[t]  # [H, W]
+            weighted_irreversibility = movement_magnitude * confidence
+
+            if mask is not None:
+                weighted_irreversibility = weighted_irreversibility * mask.float()
+                reversibility_loss += weighted_irreversibility.sum() / (mask.sum() + 1e-8)
+            else:
+                reversibility_loss += weighted_irreversibility.mean()
+
+        # Combine basic bidirectional loss with movement-based loss
+        movement_weight = 0.3  # Weight for movement validation (30% of bi loss)
+        enhanced_bi_loss = (1 - movement_weight) * basic_bi_loss + movement_weight * reversibility_loss
+
+        return enhanced_bi_loss
+
     def _compute_bidirectional_loss(self, forward_pred: torch.Tensor, backward_pred: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Compute bi-directional agreement per step: Σ_t JS(Q→(o_t) || Q←(o_t))
@@ -691,20 +1010,25 @@ class ARCPromptGuidedAgent(nn.Module):
         
         return torch.stack(predictions), critique_scores  # [T, H, W, C], List[T] of [3]
     
-    def backward_planning(self, 
-                         target_state: torch.Tensor, 
+    def backward_planning(self,
+                         target_state: torch.Tensor,
                          prompt_embedding: torch.Tensor,
                          num_steps: int,
-                         grid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                         grid_mask: Optional[torch.Tensor] = None,
+                         use_input_as_target: bool = False,
+                         input_state: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Generate backward predictions Q←(o_t) with prompt guidance for reverse thinking validation.
-        
+        NEW: Optionally use input grid as target for stronger bidirectional consistency check.
+
         Args:
             target_state: [H, W] - Target grid state
             prompt_embedding: [D] - Natural language objective embedding
             num_steps: Number of planning steps
             grid_mask: [H, W] - Binary mask for valid positions
-            
+            use_input_as_target: If True, compute consistency loss toward input_state (reversibility check)
+            input_state: [H, W] - Original input grid (for reversibility validation)
+
         Returns:
             predictions: [T, H, W, C] - Backward predictions (reversed order)
         """
@@ -761,9 +1085,11 @@ class ARCPromptGuidedAgent(nn.Module):
                      prompt_embedding: torch.Tensor,
                      num_steps: int,
                      grid_mask: Optional[torch.Tensor] = None,
-                     success_rate: float = 0.5) -> Dict[str, torch.Tensor]:
+                     success_rate: float = 0.5,
+                     use_reversibility_check: bool = True) -> Dict[str, torch.Tensor]:
         """
         Train on a single episode using EFE loss with prompt guidance and self-critique.
+        NEW: Supports reversibility check where backward planning infers the input grid.
 
         Args:
             initial_state: [H, W] - Initial grid
@@ -773,6 +1099,7 @@ class ARCPromptGuidedAgent(nn.Module):
             num_steps: Number of planning steps
             grid_mask: [H, W] - Binary mask for valid positions
             success_rate: Recent success rate for adaptive EMA smoothing
+            use_reversibility_check: If True, backward planning targets input grid for reversibility
 
         Returns:
             Dictionary of losses and critique information
@@ -781,8 +1108,11 @@ class ARCPromptGuidedAgent(nn.Module):
         forward_preds, critique_scores = self.forward_planning(
             initial_state, prompt_embedding, num_steps, grid_mask
         )
+        # NEW: Enhanced backward planning with optional reversibility check
         backward_preds = self.backward_planning(
-            target_state, prompt_embedding, num_steps, grid_mask
+            target_state, prompt_embedding, num_steps, grid_mask,
+            use_input_as_target=use_reversibility_check,
+            input_state=initial_state
         )
 
         # Use forward predictions as state predictions
@@ -807,6 +1137,15 @@ class ARCPromptGuidedAgent(nn.Module):
             grid_mask=grid_mask
         )
 
+        # NEW: Add reversibility loss if using reversibility check
+        if use_reversibility_check:
+            reversibility_loss = self._compute_reversibility_loss(
+                backward_preds, initial_state, grid_mask
+            )
+            losses['reversibility'] = reversibility_loss
+            # Weight reversibility strongly in the total loss (40% of bidirectional loss)
+            losses['total'] = losses['total'] + 0.4 * reversibility_loss
+
         # Add self-critique analysis
         critique_analysis = self._analyze_critique_scores(critique_scores, prompt_text)
         losses.update(critique_analysis)
@@ -824,6 +1163,46 @@ class ARCPromptGuidedAgent(nn.Module):
 
         return losses
     
+    def _compute_reversibility_loss(self,
+                                   backward_preds: torch.Tensor,
+                                   initial_state: torch.Tensor,
+                                   grid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute reversibility loss: how well can backward planning recover the input?
+        NEW: Stronger bidirectional check - verifies transformation is invertible.
+
+        Args:
+            backward_preds: [T, H, W, C] - Backward predictions
+            initial_state: [H, W] - Original input state
+            grid_mask: [H, W] - Optional mask for valid positions
+
+        Returns:
+            reversibility_loss: Scalar loss measuring how well backward recovers input
+        """
+        # The final backward prediction should match the initial input
+        final_backward_pred = backward_preds[-1]  # [H, W, C]
+
+        # Compute cross-entropy loss: backward output should predict input
+        if grid_mask is not None:
+            # Set target to ignore_index for masked positions
+            ignore_index = -100
+            tgt = initial_state.clone()
+            tgt[grid_mask == 0] = ignore_index
+            reversibility_loss = F.cross_entropy(
+                final_backward_pred.view(-1, final_backward_pred.size(-1)),
+                tgt.view(-1),
+                ignore_index=ignore_index,
+                reduction='mean'
+            )
+        else:
+            reversibility_loss = F.cross_entropy(
+                final_backward_pred.view(-1, final_backward_pred.size(-1)),
+                initial_state.view(-1),
+                reduction='mean'
+            )
+
+        return reversibility_loss
+
     def _analyze_critique_scores(self, critique_scores: List[torch.Tensor], prompt_text: str) -> Dict[str, torch.Tensor]:
         """
         Analyze self-critique scores for interpretability.
