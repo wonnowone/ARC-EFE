@@ -202,7 +202,7 @@ def train_epoch(agent, qwen, solver2, efe_loss, train_loader, optimizer, device,
     display_total = min(total_batches, max_batches) if max_batches else total_batches
     pbar = tqdm(enumerate(train_loader), total=display_total,
                 desc=f"Epoch {epoch} Training", unit="batch",
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                bar_format='{n_fmt}/{total_fmt} [{elapsed}]', disable=False)
 
     for batch_idx, batch in pbar:
         if max_batches and batch_idx >= max_batches:
@@ -637,6 +637,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
     logger.log("="*70)
 
     for epoch in range(epochs):
+        epoch_start_time = time.time()
         logger.log(f"\n[Epoch {epoch}/{epochs-1}]")
 
         avg_loss, loss_components = train_epoch(agent, qwen, solver2, efe_loss, train_ld, optim, device, feat_reg,
@@ -665,6 +666,9 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=None, weight_decay=1e-6,
                 torch.save(agent.state_dict(), best_ckpt)
                 torch.save(qwen.state_dict(),  qwen_ckpt)
                 logger.log(f"  Best checkpoint saved!")
+
+        epoch_elapsed = time.time() - epoch_start_time
+        logger.log(f"  Time: {epoch_elapsed:.2f}s")
 
     logger.log("\n" + "="*70)
     logger.log("FINAL TEST EVALUATION (Strict Binary Accuracy)")

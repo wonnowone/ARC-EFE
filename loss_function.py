@@ -560,15 +560,15 @@ class EFELoss(nn.Module):
                 tgt = target.clone()
                 tgt[mask == 0] = ignore_index
                 matching_loss = F.cross_entropy(
-                    final_pred.view(-1, final_pred.size(-1)),
-                    tgt.view(-1),
+                    final_pred.reshape(-1, final_pred.size(-1)),
+                    tgt.reshape(-1),
                     ignore_index=ignore_index,
                     reduction='mean'
                 )
             else:
                 matching_loss = F.cross_entropy(
-                    final_pred.view(-1, final_pred.size(-1)),
-                    target.view(-1),
+                    final_pred.reshape(-1, final_pred.size(-1)),
+                    target.reshape(-1),
                     reduction='mean'
                 )
         else:
@@ -597,8 +597,8 @@ class EFELoss(nn.Module):
                 tgt = target.clone()
                 tgt[mask == 0] = ignore_index
                 return F.cross_entropy(
-                    final_pred.view(-1, final_pred.size(-1)),
-                    tgt.view(-1),
+                    final_pred.reshape(-1, final_pred.size(-1)),
+                    tgt.reshape(-1),
                     ignore_index=ignore_index,
                     reduction='mean'
                 )
@@ -989,8 +989,8 @@ class ARCPromptGuidedAgent(nn.Module):
             )
             
             # Reshape back to spatial: [1, hidden_dim, H, W]
-            attended_features = attended_features.transpose(1, 2).view(1, self.hidden_dim, H, W)
-            
+            attended_features = attended_features.transpose(1, 2).reshape(1, self.hidden_dim, H, W)
+
             # Predict next state
             next_state_logits = self.forward_model['predictor'](attended_features)
             
@@ -1063,8 +1063,8 @@ class ARCPromptGuidedAgent(nn.Module):
             )
             
             # Reshape back to spatial: [1, hidden_dim, H, W]
-            attended_features = attended_features.transpose(1, 2).view(1, self.hidden_dim, H, W)
-            
+            attended_features = attended_features.transpose(1, 2).reshape(1, self.hidden_dim, H, W)
+
             # Predict previous state
             prev_state_logits = self.backward_model['predictor'](attended_features)
             
@@ -1196,15 +1196,15 @@ class ARCPromptGuidedAgent(nn.Module):
             tgt = initial_state.clone()
             tgt[grid_mask == 0] = ignore_index
             reversibility_loss = F.cross_entropy(
-                final_backward_pred.view(-1, final_backward_pred.size(-1)),
-                tgt.view(-1),
+                final_backward_pred.reshape(-1, final_backward_pred.size(-1)),
+                tgt.reshape(-1),
                 ignore_index=ignore_index,
                 reduction='mean'
             )
         else:
             reversibility_loss = F.cross_entropy(
-                final_backward_pred.view(-1, final_backward_pred.size(-1)),
-                initial_state.view(-1),
+                final_backward_pred.reshape(-1, final_backward_pred.size(-1)),
+                initial_state.reshape(-1),
                 reduction='mean'
             )
 
