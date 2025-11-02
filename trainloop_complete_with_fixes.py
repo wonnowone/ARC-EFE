@@ -267,11 +267,21 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
             # Get all predictions from planning steps
             # predictions_after shape: [num_steps, H, W, num_colors]
             num_steps = predictions_after.shape[0]
-            H, W = predictions_after.shape[1:3]
+            H_pred, W_pred = predictions_after.shape[1:3]
+            H_tgt, W_tgt = out.shape  # Target grid dimensions
 
-            # Generate required inputs for EFELoss:
-            # - forward_predictions: all planning steps
+            # Handle size mismatch: resize predictions to match target if needed
             forward_preds = predictions_after  # [T, H, W, C]
+            if (H_pred, W_pred) != (H_tgt, W_tgt):
+                # Resize each step to match target size
+                forward_preds = torch.nn.functional.interpolate(
+                    forward_preds.permute(0, 3, 1, 2).float(),  # [T, C, H, W]
+                    size=(H_tgt, W_tgt),
+                    mode='bilinear',
+                    align_corners=False
+                ).permute(0, 2, 3, 1)  # [T, H, W, C]
+
+            H, W = H_tgt, W_tgt  # Use target dimensions for loss computation
 
             # - backward_predictions: can use reversed forward predictions
             #   (represents backward planning from end state)

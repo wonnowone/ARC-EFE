@@ -208,7 +208,24 @@ class HumanRLAugmentor(nn.Module):
 
 @torch.no_grad()
 def per_cell_accuracy(pred_hw, tgt_hw):
-    """Per-cell accuracy: fraction of matching cells."""
+    """Per-cell accuracy: fraction of matching cells.
+
+    Handles size mismatches by resizing prediction to match target.
+    Uses nearest-neighbor resize to preserve discrete color values.
+    """
+    # Handle size mismatch by resizing prediction to target size
+    if pred_hw.shape != tgt_hw.shape:
+        # Resize prediction to match target dimensions
+        # Use nearest-neighbor interpolation to preserve discrete values
+        pred_resized = torch.nn.functional.interpolate(
+            pred_hw.float().unsqueeze(0).unsqueeze(0),  # [1, 1, H, W]
+            size=tgt_hw.shape,
+            mode='nearest'
+        ).squeeze(0).squeeze(0)  # [H, W]
+        pred_resized = pred_resized.round().long()  # Convert back to discrete
+        pred_hw = pred_resized
+
+    # Now shapes match, compute accuracy
     correct = (pred_hw == tgt_hw).float().mean()
     return correct
 
@@ -223,7 +240,22 @@ def size_gain(pred_hw, tgt_hw):
 
 @torch.no_grad()
 def color_agreement(pred_hw, tgt_hw, num_colors=10):
-    """Color histogram similarity."""
+    """Color histogram similarity.
+
+    Handles size mismatches by resizing prediction to match target.
+    Compares color distributions regardless of spatial layout.
+    """
+    # Handle size mismatch (same as per_cell_accuracy)
+    if pred_hw.shape != tgt_hw.shape:
+        pred_resized = torch.nn.functional.interpolate(
+            pred_hw.float().unsqueeze(0).unsqueeze(0),
+            size=tgt_hw.shape,
+            mode='nearest'
+        ).squeeze(0).squeeze(0)
+        pred_resized = pred_resized.round().long()
+        pred_hw = pred_resized
+
+    # Compute color histograms
     pred_hist = torch.stack([(pred_hw==c).float().mean() for c in range(num_colors)])
     tgt_hist  = torch.stack([(tgt_hw==c).float().mean()  for c in range(num_colors)])
     return 1.0 - TF.l1_loss(pred_hist, tgt_hist, reduction="mean")
@@ -231,10 +263,25 @@ def color_agreement(pred_hw, tgt_hw, num_colors=10):
 
 @torch.no_grad()
 def reversible_gain(pred1, inp_hw, solver_back=None):
-    """Reversibility: can backward model reconstruct input?"""
+    """Reversibility: can backward model reconstruct input?
+
+    Handles size mismatches by resizing reconstruction to match input.
+    """
     if solver_back is None:
         return torch.tensor(0.5)
+
     recon = solver_back(pred1)
+
+    # Handle size mismatch between reconstruction and input
+    if recon.shape != inp_hw.shape:
+        recon_resized = torch.nn.functional.interpolate(
+            recon.float().unsqueeze(0).unsqueeze(0),
+            size=inp_hw.shape,
+            mode='nearest'
+        ).squeeze(0).squeeze(0)
+        recon_resized = recon_resized.round().long()
+        recon = recon_resized
+
     sim = (recon == inp_hw).float().mean()
     return sim
 
