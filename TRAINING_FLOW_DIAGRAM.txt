@@ -1,0 +1,274 @@
+═══════════════════════════════════════════════════════════════════════════════
+  GOAL-ORIENTED TRAINING FLOW WITH HUMAN RL AGENT
+═══════════════════════════════════════════════════════════════════════════════
+
+STANDARD APPROACH (trainloop_gpu_finetuned.py)
+────────────────────────────────────────────────────────────────────────────────
+
+    INPUT GRID
+        ↓
+        ├─→ Qwen (frozen) ──→ PROMPT
+        └─→ Features
+
+    [SINGLE FORWARD PASS]
+        ↓
+    Agent (prompt) ──→ PREDICTION
+        ↓
+    EFE Loss (prediction vs target)
+        ↓
+    Backward pass
+        ↓
+    Update weights
+        ↓
+    Log: "Loss 8.2 → 7.5 ✓"
+         "Accuracy 2% ✗"   ← Problem: No clear connection!
+
+
+GOAL-ORIENTED APPROACH (trainloop_with_rl_agent.py) ← NEW
+────────────────────────────────────────────────────────────────────────────────
+
+    INPUT GRID
+        ↓
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 1: GET BASELINE (Qwen's fixed prompt)                  ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+        ├─→ Qwen ──→ PROMPT_INITIAL
+        ├─→ Features ──→ CTRL_VEC
+        └─→ Features ──→ FEAT_SUMMARY
+
+    Agent (PROMPT_INITIAL) ──→ PRED_BEFORE [H,W,10]
+
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 2: RL REFINES THE PROMPT                                ║
+    ║ Goal: "Find prompt modifications that improve accuracy"      ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+    HumanRLAugmentor(PROMPT, CTRL_VEC, FEAT_SUMMARY)
+        ├─→ Learns: Δprompt [256]    (what to add/change)
+        ├─→ Learns: α ∈ (0,1)        (how much to apply)
+        ├─→ Computes: logp           (action probability)
+        ├─→ Computes: value          (state quality)
+        └─→ Computes: entropy        (exploration bonus)
+
+    PROMPT_REFINED = (1-α) * PROMPT_INITIAL + α * (PROMPT_INITIAL + Δ)
+
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 3: GET REFINED PREDICTION                               ║
+    ║ With RL-improved prompt                                       ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+    Agent (PROMPT_REFINED) ──→ PRED_AFTER [H,W,10]
+
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 4: MEASURE EXPLICIT GOAL PROGRESS                       ║
+    ║ Compare before/after on CONCRETE METRICS                     ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+    REWARD SHAPING:
+        ├─→ Accuracy Delta = (acc_after - acc_before)     ← PRIMARY
+        ├─→ Size Delta = (size_after - size_before)       ← SECONDARY
+        ├─→ Color Delta = (color_after - color_before)    ← SECONDARY
+        └─→ Reversibility Delta = (rev_after - rev_before) ← SECONDARY
+
+    REWARD = 1.0*accuracy_delta + 0.5*size_delta + 0.5*color_delta + ...
+
+    Result: We know EXACTLY what improved!
+
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 5: UPDATE RL AGENT (Learn toward explicit goals)        ║
+    ║ Policy gradient: optimize for REWARD (not abstract loss)     ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+    RL_AGENT.update(logp, value, entropy, reward)
+        ├─→ Policy Loss = -(logp * advantage)
+        ├─→ Value Loss = (value - return)²
+        ├─→ Entropy Bonus (exploration)
+        └─→ ICM Loss (intrinsic curiosity)
+
+    RL learns: "What prompt changes improve accuracy?"
+    Goal DIRECTLY connected to learning!
+
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 6: COMPUTE EFE LOSS (Agent adaptation)                  ║
+    ║ Agent learns to use refined prompts                          ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+    EFE_LOSS(PRED_AFTER, TARGET, PROMPT_REFINED)
+        ├─→ Risk loss
+        ├─→ Consistency loss
+        ├─→ Bidirectional loss
+        └─→ ... (7 components)
+
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║ STEP 7: COMBINED UPDATE                                      ║
+    ║ Both systems move toward goal: SOLVE THE PROBLEM             ║
+    ╚═══════════════════════════════════════════════════════════════╝
+        ↓
+    COMBINED_LOSS = 0.7 * EFE_LOSS + 0.3 * (-REWARD)
+
+    Backward pass (all weights):
+        ├─→ RL_AGENT learns: "Refine prompts toward accuracy"
+        └─→ MAIN_AGENT learns: "Use refined prompts to solve"
+        ↓
+    Update weights
+        ↓
+    Log:
+        ├─→ "Accuracy improved +4.5%"      ← CONCRETE!
+        ├─→ "Size matching improved +1.2%"
+        ├─→ "RL reward signal: +0.0234"
+        └─→ "Loss decreased" (consequence)  ← CONSEQUENCE, not goal!
+
+
+METRIC TRACKING
+════════════════════════════════════════════════════════════════════════════════
+
+Standard Training:
+┌──────────────────────────────────────────┐
+│ Epoch 0: Loss=8.23  Acc=2.0%            │
+│ Epoch 1: Loss=7.45  Acc=2.1%            │
+│ Epoch 2: Loss=6.67  Acc=2.3%            │
+│ Epoch 3: Loss=5.89  Acc=2.5%            │
+│                                          │
+│ Analysis: "Loss decreased 28% but       │
+│           accuracy only 25% improvement" │
+│ Conclusion: Unclear if learning works   │
+└──────────────────────────────────────────┘
+
+
+Goal-Oriented Training:
+┌──────────────────────────────────────────┐
+│ Epoch 0: Acc_Δ=+2.3%  Size_Δ=+1.1%     │
+│ Epoch 1: Acc_Δ=+5.8%  Size_Δ=+2.3%     │
+│ Epoch 2: Acc_Δ=+7.1%  Size_Δ=+3.2%     │
+│ Epoch 3: Acc_Δ=+6.9%  Size_Δ=+2.8%     │
+│                                          │
+│ Analysis: "Accuracy improving 2-7% each │
+│           epoch, size matching improving"│
+│ Conclusion: Clear, steady progress!     │
+└──────────────────────────────────────────┘
+
+
+COMPONENT INTERACTIONS
+════════════════════════════════════════════════════════════════════════════════
+
+    Qwen (frozen)
+        ↓ (provides initial prompt)
+        └─→ HumanRLAugmentor ──────────────┐
+                                           │
+        Features ──→ CTRL_VEC ────────────→├─→ PROMPT_REFINED
+        Features ──→ FEAT_SUMMARY ────────→│
+                                           │
+                                           ↓
+        Agent ───────────────────→ PRED_BEFORE (with Qwen prompt)
+        Agent ───────────────────→ PRED_AFTER (with refined prompt)
+
+        TARGET GRID ──────┐
+        INPUT GRID ───────├──→ Reward Shaping
+        PRED_BEFORE ──────├──→ (4 explicit goals)
+        PRED_AFTER ───────┘
+
+        RL outputs + Reward ──→ RL_AGENT.update() ─→ Better prompts
+
+        PRED_AFTER + TARGET ──→ EFE_LOSS ────────→ Better agent
+
+
+DECISION TREE: What to Optimize
+════════════════════════════════════════════════════════════════════════════════
+
+Is accuracy improving? ──→ YES ──→ RL is learning ✓
+    ↓
+    NO ──→ Check:
+         ├─→ Is RL reward positive? ──→ NO → Adjust LR
+         ├─→ Is PRED_AFTER better than PRED_BEFORE? ──→ NO → RL not working
+         └─→ Does target accuracy matter? ──→ NO → Adjust reward weights
+
+
+EXECUTION CHECKLIST
+════════════════════════════════════════════════════════════════════════════════
+
+Before Training:
+  ✓ Qwen model loaded
+  ✓ Agent model initialized
+  ✓ PolicyRefinedAgent created
+  ✓ Optimizer configured (all parameters)
+  ✓ FeatureRegistry initialized
+
+During Training (per epoch):
+  ✓ Loop through batches
+  ✓ Get initial prediction
+  ✓ RL refines prompt
+  ✓ Get refined prediction
+  ✓ Compute reward (4 metrics)
+  ✓ Update RL agent
+  ✓ Compute EFE loss
+  ✓ Combined backward
+  ✓ Log metrics
+
+Metrics to Track:
+  ✓ Accuracy Delta (should be positive)
+  ✓ Size Delta (should increase if applicable)
+  ✓ Color Delta (should increase if applicable)
+  ✓ RL Reward (should be positive on average)
+  ✓ Val Accuracy (should increase over epochs)
+
+What Success Looks Like:
+  ✓ Accuracy Delta: +2% to +10% per epoch
+  ✓ RL Reward: +0.01 to +0.10 per batch
+  ✓ Val Accuracy: Steady increase over epochs
+  ✓ Log entries show clear goal progress
+
+
+FILES INVOLVED
+════════════════════════════════════════════════════════════════════════════════
+
+Input:
+  human_rl_agent.py ────────┐
+                            ├──→ policy_refined.py ────┐
+  reward_shaping.py ────────┘                          │
+                                                       ├──→ trainloop_with_rl_agent.py
+  qwen_hybrid_prompt.py ────┐                          │
+  loss_function.py          ├──→ trainloop_with_rl_agent.py
+  grid_accuracy_loss.py ────┘
+
+Output:
+  runs/arc_rl_agent_YYYYMMDD_HHMMSS/
+    ├─ training.log              (full metrics & logs)
+    ├─ metrics_goal_oriented.json (structured data)
+    └─ agent_best.pt             (checkpoint)
+
+
+EXPECTED BEHAVIOR
+════════════════════════════════════════════════════════════════════════════════
+
+Healthy Training:
+
+  Batch 0-50:     RL exploring, reward ~+0.001 to +0.005
+  Batch 50-100:   RL finding patterns, reward ~+0.01 to +0.03
+  Batch 100-200:  RL converging, reward ~+0.03 to +0.08
+  Batch 200+:     RL stable, reward ~+0.05 to +0.10
+
+  Epoch 0: Accuracy_Δ +2-4%  → RL initializing
+  Epoch 1: Accuracy_Δ +4-6%  → RL learning
+  Epoch 2: Accuracy_Δ +5-8%  → RL optimizing
+  Epoch 5: Accuracy_Δ +4-7%  → Diminishing returns
+  Epoch 9: Accuracy_Δ +3-6%  → Saturation
+
+
+Problematic Training:
+
+  Accuracy_Δ always 0.0000 ──→ RL not helping (check reward shaping)
+  RL Reward always negative ──→ RL making things worse (check LR)
+  RLoss exploding (1→10→100) ──→ RL diverging (reduce rl_entropy_coef)
+  Loss increasing steady ──────→ Normal! (not the primary goal anymore)
+
+
+════════════════════════════════════════════════════════════════════════════════
+END OF FLOW DIAGRAM
+════════════════════════════════════════════════════════════════════════════════
