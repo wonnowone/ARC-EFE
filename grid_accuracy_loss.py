@@ -173,9 +173,11 @@ class ARCPromptGuidedAgentGPU(nn.Module):
         # Handle input grid dimensions
         if input_grid.dim() == 2:
             # One-hot encode [H, W] → [num_colors, H, W]
+            # scatter_ requires indices to be int64, so convert if needed
+            indices = input_grid.long() if input_grid.dtype != torch.long else input_grid
             one_hot = torch.zeros(self.num_colors, *input_grid.shape,
-                                 device=input_grid.device, dtype=input_grid.dtype)
-            one_hot.scatter_(0, input_grid.unsqueeze(0), 1.0)
+                                 device=input_grid.device, dtype=torch.float32)
+            one_hot.scatter_(0, indices.unsqueeze(0), 1.0)
             input_grid = one_hot
         elif input_grid.dim() == 3:
             if input_grid.shape[0] != self.num_colors:

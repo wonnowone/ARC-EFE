@@ -27,7 +27,7 @@ import torch.nn as nn
 from datetime import datetime
 from torch.utils.data import DataLoader
 from typing import Dict, Optional, Tuple
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler, autocast
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -238,7 +238,7 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
 
             # Agent expects: input_grid [H,W], prompt_embedding [prompt_dim]
             # Returns: (predictions [num_steps, H, W, num_colors], features [H, W, hidden])
-            predictions_before, _ = agent.forward(inp.float(), qwen_prompt)
+            predictions_before, _ = agent.forward(inp, qwen_prompt)
             pred_before = predictions_before[-1].argmax(dim=-1)  # Take final step
 
         # ========== STEP 2: RL REFINES PROMPT ==========
@@ -262,7 +262,7 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         optimizer.zero_grad()
 
         # FIX #7: Use AMP for numerical stability
-        with autocast():
+        with autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
             # Get all predictions from planning steps
             # predictions_after shape: [num_steps, H, W, num_colors]
             num_steps = predictions_after.shape[0]
@@ -539,7 +539,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=5e-5, device="cuda", seed=42,
     optimizer = torch.optim.Adam(trainable_params, weight_decay=1e-6)
 
     # FIX #7: GradScaler for AMP
-    scaler = GradScaler()
+    scaler = GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
 
     # FIX #4: Size warmup curriculum
     size_warmup = SizeWarmupCurriculum(total_epochs=epochs, warmup_epochs=3)
