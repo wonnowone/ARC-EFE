@@ -262,7 +262,8 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         optimizer.zero_grad()
 
         # FIX #7: Use AMP for numerical stability
-        with autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
+        # device is a string ('cuda' or 'cpu'), use it directly
+        with autocast(device_type=device):
             # Get all predictions from planning steps
             # predictions_after shape: [num_steps, H, W, num_colors]
             num_steps = predictions_after.shape[0]
@@ -539,7 +540,8 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=5e-5, device="cuda", seed=42,
     optimizer = torch.optim.Adam(trainable_params, weight_decay=1e-6)
 
     # FIX #7: GradScaler for AMP
-    scaler = GradScaler(device='cuda' if device.type == 'cuda' else 'cpu')
+    # device is a string ('cuda' or 'cpu'), use it directly
+    scaler = GradScaler(device=device)
 
     # FIX #4: Size warmup curriculum
     size_warmup = SizeWarmupCurriculum(total_epochs=epochs, warmup_epochs=3)
