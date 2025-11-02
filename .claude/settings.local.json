@@ -4,7 +4,8 @@
       "Bash(cd:*)",
       "Bash(dir \"C:\\Users\\SAMSUNG\\OneDrive\\바탕 화면\\ARC-EFE\\ARC-EFE\")",
       "Bash(dir /s \"C:\\Users\\SAMSUNG\\OneDrive\\바탕 화면\\ARC-EFE\\ARC-EFE\" /b)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(python -m py_compile:*)"
     ],
     "deny": [],
     "ask": []
