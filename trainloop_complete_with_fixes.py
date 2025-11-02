@@ -172,7 +172,7 @@ def pack_transform_record(inp, out):
     return feats
 
 
-def train_epoch_complete(agent, qwen, solver2, efe_loss, grid_loss, policy_rl, train_loader,
+def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader,
                         optimizer, scaler, device, feat_reg, epoch, logger,
                         max_batches=None, persistence=None,
                         size_warmup=None, memory_threshold=None):
@@ -258,33 +258,63 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, grid_loss, policy_rl, t
         rl_reward = rl_losses.get("reward", 0.0)
         rl_rewards_sum += rl_reward
 
-        # ========== STEP 6: COMPUTE GRID ACCURACY LOSS WITH FIXES ==========
+        # ========== STEP 6: COMPUTE EFE LOSS WITH FIXES ==========
         optimizer.zero_grad()
 
         # FIX #7: Use AMP for numerical stability
         with autocast():
             # Get all predictions from planning steps
             # predictions_after shape: [num_steps, H, W, num_colors]
-            final_pred = predictions_after[-1]  # [H, W, num_colors]
+            num_steps = predictions_after.shape[0]
+            H, W = predictions_after.shape[1:3]
+
+            # Generate required inputs for EFELoss:
+            # - forward_predictions: all planning steps
+            forward_preds = predictions_after  # [T, H, W, C]
+
+            # - backward_predictions: can use reversed forward predictions
+            #   (represents backward planning from end state)
+            backward_preds = torch.flip(forward_preds, dims=[0])  # [T, H, W, C] reversed
+
+            # - state_predictions: can use same as forward
+            #   (represents state belief at each step)
+            state_preds = forward_preds  # [T, H, W, C]
+
+            # - observation_probs: compute from forward predictions via softmax
+            #   (represents P(o_t|s_t) - likelihood of observation given state)
+            obs_probs = torch.nn.functional.softmax(forward_preds, dim=-1)  # [T, H, W, C]
+
+            # - final_prediction: final step prediction
+            final_pred = forward_preds[-1]  # [H, W, C]
 
             # FIX #3: Apply hard-cell masking
             mask = (pred_after != out).float()  # 1 where wrong, 0 where right
             mask_ratio = mask.sum() / max(mask.numel(), 1)
 
-            # Compute loss on final prediction using cross-entropy
-            loss, acc, _ = grid_loss(final_pred, out, return_components=True)
+            # Create grid mask for valid positions (all 1s for now)
+            grid_mask = torch.ones(H, W, device=device)
+
+            # Call EFELoss with all required inputs
+            efe_losses = efe_loss(
+                forward_preds, backward_preds, state_preds, obs_probs, final_pred,
+                out.float(), episode_length=num_steps,
+                prompt_embedding=refined_prompt, grid_mask=grid_mask
+            )
+
+            # Get total loss (sum of all components)
+            efe_loss_val = efe_losses.get("total", sum(efe_losses.values()))
 
             # Weight by hard cells (focus training on mistakes)
             if mask_ratio > 0.01:  # Only if significant mistakes
-                loss = loss * mask_ratio
+                efe_loss_val = efe_loss_val * mask_ratio
 
             # FIX #4: Size warmup curriculum - scale loss weight
             size_weight = size_warmup.get_size_loss_weight(epoch) if size_warmup else 0.5
-            loss = loss * size_weight
+            efe_loss_val = efe_loss_val * size_weight
 
-            # FIX #2: Goal-oriented loss - combine with reward
+            # FIX #2: Goal-oriented loss - combine with RL reward
             reward_tensor = torch.tensor(reward, device=device, dtype=torch.float32)
-            combined_loss = (0.7 * loss + 0.3 * (-reward_tensor))
+            combined_loss = (0.7 * efe_loss_val + 0.3 * (-reward_tensor))
 
         # FIX #7: Backward with scaler
         scaler.scale(combined_loss).backward()
@@ -484,9 +514,6 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=5e-5, device="cuda", seed=42,
 
     solver2 = PermanentSolver(input_dim=256, hidden_dim=512, max_grid_size=30, num_colors=10).to(device)
 
-    # Grid accuracy loss for direct grid prediction
-    grid_loss = GridAccuracyLoss(use_focal=True, focal_gamma=2.0).to(device)
-
     efe_loss_module = EFELoss(
         lambda_risk=1.0, lambda_amb=0.0, lambda_step=0.1, lambda_cons=1.0,
         lambda_bi=0.5, lambda_z=0.2, lambda_prompt=0.3,
@@ -546,7 +573,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=5e-5, device="cuda", seed=42,
         epoch_start = time.time()
 
         avg_loss, loss_components = train_epoch_complete(
-            agent, qwen, solver2, efe_loss_module, grid_loss, policy_rl,
+            agent, qwen, solver2, efe_loss_module, policy_rl,
             train_ld, optimizer, scaler, device, feat_reg, epoch, logger,
             max_batches_per_epoch, persistence, size_warmup, memory_threshold
         )
