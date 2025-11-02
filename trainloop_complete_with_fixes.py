@@ -250,6 +250,20 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         predictions_after, _ = agent.forward(inp.float(), refined_prompt)
         pred_after = predictions_after[-1].argmax(dim=-1)  # Take final step
 
+        # ========== STEP 3b: RESIZE PREDICTIONS TO TARGET SIZE ==========
+        H_agent, W_agent = pred_after.shape
+        H_tgt, W_tgt = out.shape
+        
+        if (H_agent, W_agent) != (H_tgt, W_tgt):
+            pred_after = torch.nn.functional.interpolate(
+                pred_after.float().unsqueeze(0).unsqueeze(0), 
+                size=(H_tgt, W_tgt), mode='nearest'
+            ).squeeze(0).squeeze(0).long()
+            pred_before = torch.nn.functional.interpolate(
+                pred_before.float().unsqueeze(0).unsqueeze(0),
+                size=(H_tgt, W_tgt), mode='nearest'  
+            ).squeeze(0).squeeze(0).long()
+
         # ========== STEP 4: MEASURE REWARD ==========
         reward, breakdown = policy_rl.compute_reward(pred_before, pred_after, out, inp)
 
