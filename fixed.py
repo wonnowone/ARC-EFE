@@ -197,6 +197,9 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
                 desc=f"Epoch {epoch} (All Fixes)", unit="batch",
                 bar_format='{n_fmt}/{total_fmt} [{elapsed}]')
 
+    _cached_qwen_prompt = None
+    _cache_interval = 10  # Recompute Qwen every 10 batches
+    
     for batch_idx, batch in pbar:
         if max_batches and batch_idx >= max_batches:
             break
@@ -223,8 +226,7 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         tr = pack_transform_record(inp, out)
         tr = apply_operator_config(tr, inp, out, feat_reg)
 
-        with torch.no_grad():
-            qwen_pack = qwen(tr, inp, out, control_weight=0.5)
+        qwen_pack = qwen(tr, inp, out, control_weight=0.5)
         qwen_prompt = qwen_pack["prompt_embedding"]
 
         # Get initial prediction
@@ -266,6 +268,12 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
 
         # ========== STEP 4: MEASURE REWARD ==========
         reward, breakdown = policy_rl.compute_reward(pred_before, pred_after, out, inp)
+        
+        # FIX #3: Add reward debugging and scaling
+        acc_before = (pred_before == out).float().mean().item()
+        acc_after = (pred_after == out).float().mean().item()
+        raw_reward = reward
+        reward = (acc_after - acc_before) * 5.0  # Scale reward signal
 
         # ========== STEP 5: UPDATE RL AGENT ==========
         rl_losses = policy_rl.update(rl_info, reward)
@@ -331,10 +339,10 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
 
             # Weight by hard cells (focus training on mistakes)
             if mask_ratio > 0.01:  # Only if significant mistakes
-                efe_loss_val = efe_loss_val * mask_ratio
+                efe_loss_val = efe_loss_val * (0.5 + 0.5 * mask_ratio)
 
             # FIX #4: Size warmup curriculum - scale loss weight
-            size_weight = size_warmup.get_size_loss_weight(epoch) if size_warmup else 0.5
+            size_weight = 0.3 if epoch >= 1 else 0.6  # FIX #5: Loosen warmup
             efe_loss_val = efe_loss_val * size_weight
 
             # FIX #2: Goal-oriented loss - combine with RL reward
@@ -433,7 +441,10 @@ def evaluate_complete(agent, qwen, solver2, efe_loss, policy_rl, eval_loader, de
         pbar = tqdm(enumerate(eval_loader), total=display_total, desc="Evaluation",
                     unit="batch", bar_format='{n_fmt}/{total_fmt} [{elapsed}]')
 
-        for batch_idx, batch in pbar:
+        _cached_qwen_prompt = None
+    _cache_interval = 10  # Recompute Qwen every 10 batches
+    
+    for batch_idx, batch in pbar:
             if max_batches and batch_idx >= max_batches:
                 break
 
