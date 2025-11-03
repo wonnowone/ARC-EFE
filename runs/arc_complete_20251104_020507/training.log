@@ -1,0 +1,10 @@
+Device: cuda
+Epochs: 1
+Agent LR: 1e-05 (FIX #1: Qwen trainable)
+Qwen LR: 5e-05
+Output: runs/arc_complete_20251104_020507
+
+Loading datasets...
+  Train: 3232 | Val: 1076
+
+Creating models...
