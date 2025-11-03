@@ -230,18 +230,17 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         qwen_prompt = qwen_pack["prompt_embedding"]
 
         # Get initial prediction
-        with torch.no_grad():
-            feat_sum = torch.tensor(
+        feat_sum = torch.tensor(
                 [tr.get(k, 0) for k in ["size_change_ratio", "pixel_change_ratio",
                                          "symmetry_change", "density_change",
                                          "spatial_correlation"] + [0]*27],
                 dtype=torch.float32, device=device
             )[:32]
 
-            # Agent expects: input_grid [H,W], prompt_embedding [prompt_dim]
-            # Returns: (predictions [num_steps, H, W, num_colors], features [H, W, hidden])
-            predictions_before, _ = agent.forward(inp, qwen_prompt)
-            pred_before = predictions_before[-1].argmax(dim=-1)  # Take final step
+        # Agent expects: input_grid [H,W], prompt_embedding [prompt_dim]
+        # Returns: (predictions [num_steps, H, W, num_colors], features [H, W, hidden])
+        predictions_before, _ = agent.forward(inp, qwen_prompt)
+        pred_before = predictions_before[-1].argmax(dim=-1)  # Take final step
 
         # ========== STEP 2: RL REFINES PROMPT ==========
         # Use control vector from features or random
