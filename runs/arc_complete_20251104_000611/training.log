@@ -1,0 +1,28 @@
+Device: cpu
+Epochs: 1
+Agent LR: 1e-05 (FIX #1: Qwen trainable)
+Qwen LR: 5e-05
+Output: runs/arc_complete_20251104_000611
+
+Loading datasets...
+  Train: 3232 | Val: 1076
+
+Creating models...
+  [OK] All models created
+
+Starting complete training...
+
+======================================================================
+
+[Batch    0] Reward:  0.0000 | Loss:  2.8621 | Qwen_grad: 1.56e+00 | Mask_ratio: 1.0000
+
+======================================================================
+EPOCH 0 SUMMARY (All 7 Problems Fixed)
+======================================================================
+  Average Loss: 2.750549
+  Average RL Reward: +0.010000
+  Qwen Gradient Norm: 1.56e+00 (FIX #1)
+  Size Warmup Weight: 1.000 (FIX #4)
+  Memory Threshold: 0.2200 (FIX #5)
+======================================================================
+

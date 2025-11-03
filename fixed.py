@@ -247,6 +247,10 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         ctrl_vec = torch.randn(256, device=device)  # Policy RL will handle this
         refined_prompt, rl_info = policy_rl.refine_prompt(qwen_prompt, ctrl_vec, feat_sum)
 
+        # DETACH RL INFO to make it independent of main computation graph
+        # This allows RL update to backward independently without graph conflicts
+        rl_info = {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in rl_info.items()}
+
         # ========== STEP 3: GET REFINED PREDICTION ==========
         predictions_after, _ = agent.forward(inp.float(), refined_prompt)
         pred_after = predictions_after[-1].argmax(dim=-1)  # Take final step
@@ -281,69 +285,68 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
 
         # FIX #7: Use AMP for numerical stability
         # device is a string ('cuda' or 'cpu'), use it directly
-        with autocast(device_type=device):
-            # Get all predictions from planning steps
-            # predictions_after shape: [num_steps, H, W, num_colors]
-            num_steps = predictions_after.shape[0]
-            H_pred, W_pred = predictions_after.shape[1:3]
-            H_tgt, W_tgt = out.shape  # Target grid dimensions
+        # Get all predictions from planning steps
+        # predictions_after shape: [num_steps, H, W, num_colors]
+        num_steps = predictions_after.shape[0]
+        H_pred, W_pred = predictions_after.shape[1:3]
+        H_tgt, W_tgt = out.shape  # Target grid dimensions
 
-            # Handle size mismatch: resize predictions to match target if needed
-            forward_preds = predictions_after  # [T, H, W, C]
-            if (H_pred, W_pred) != (H_tgt, W_tgt):
-                # Resize each step to match target size
-                forward_preds = torch.nn.functional.interpolate(
-                    forward_preds.permute(0, 3, 1, 2).float(),  # [T, C, H, W]
-                    size=(H_tgt, W_tgt),
-                    mode='bilinear',
-                    align_corners=False
-                ).permute(0, 2, 3, 1)  # [T, H, W, C]
+        # Handle size mismatch: resize predictions to match target if needed
+        forward_preds = predictions_after  # [T, H, W, C]
+        if (H_pred, W_pred) != (H_tgt, W_tgt):
+            # Resize each step to match target size
+            forward_preds = torch.nn.functional.interpolate(
+                forward_preds.permute(0, 3, 1, 2).float(),  # [T, C, H, W]
+                size=(H_tgt, W_tgt),
+                mode='bilinear',
+                align_corners=False
+            ).permute(0, 2, 3, 1)  # [T, H, W, C]
 
-            H, W = H_tgt, W_tgt  # Use target dimensions for loss computation
+        H, W = H_tgt, W_tgt  # Use target dimensions for loss computation
 
-            # - backward_predictions: can use reversed forward predictions
-            #   (represents backward planning from end state)
-            backward_preds = torch.flip(forward_preds, dims=[0])  # [T, H, W, C] reversed
+        # - backward_predictions: can use reversed forward predictions
+        #   (represents backward planning from end state)
+        backward_preds = torch.flip(forward_preds, dims=[0])  # [T, H, W, C] reversed
 
-            # - state_predictions: can use same as forward
-            #   (represents state belief at each step)
-            state_preds = forward_preds  # [T, H, W, C]
+        # - state_predictions: can use same as forward
+        #   (represents state belief at each step)
+        state_preds = forward_preds  # [T, H, W, C]
 
-            # - observation_probs: compute from forward predictions via softmax
-            #   (represents P(o_t|s_t) - likelihood of observation given state)
-            obs_probs = torch.nn.functional.softmax(forward_preds, dim=-1)  # [T, H, W, C]
+        # - observation_probs: compute from forward predictions via softmax
+        #   (represents P(o_t|s_t) - likelihood of observation given state)
+        obs_probs = torch.nn.functional.softmax(forward_preds, dim=-1)  # [T, H, W, C]
 
-            # - final_prediction: final step prediction
-            final_pred = forward_preds[-1]  # [H, W, C]
+        # - final_prediction: final step prediction
+        final_pred = forward_preds[-1]  # [H, W, C]
 
-            # FIX #3: Apply hard-cell masking
-            mask = (pred_after != out).float()  # 1 where wrong, 0 where right
-            mask_ratio = mask.sum() / max(mask.numel(), 1)
+        # FIX #3: Apply hard-cell masking
+        mask = (pred_after != out).float()  # 1 where wrong, 0 where right
+        mask_ratio = mask.sum() / max(mask.numel(), 1)
 
-            # Create grid mask for valid positions (all 1s for now)
-            grid_mask = torch.ones(H, W, device=device)
+        # Create grid mask for valid positions (all 1s for now)
+        grid_mask = torch.ones(H, W, device=device)
 
-            # Call EFELoss with all required inputs
-            efe_losses = efe_loss(
-                forward_preds, backward_preds, state_preds, obs_probs, final_pred,
-                out.long(), episode_length=num_steps,
-                prompt_embedding=refined_prompt, grid_mask=grid_mask
-            )
+        # Call EFELoss with all required inputs
+        efe_losses = efe_loss(
+            forward_preds, backward_preds, state_preds, obs_probs, final_pred,
+            out.long(), episode_length=num_steps,
+            prompt_embedding=refined_prompt, grid_mask=grid_mask
+        )
 
-            # Get total loss (sum of all components)
-            efe_loss_val = efe_losses.get("total", sum(efe_losses.values()))
+        # Get total loss (sum of all components)
+        efe_loss_val = efe_losses.get("total", sum(efe_losses.values()))
 
-            # Weight by hard cells (focus training on mistakes)
-            if mask_ratio > 0.01:  # Only if significant mistakes
-                efe_loss_val = efe_loss_val * (0.5 + 0.5 * mask_ratio)
+        # Weight by hard cells (focus training on mistakes)
+        if mask_ratio > 0.01:  # Only if significant mistakes
+            efe_loss_val = efe_loss_val * (0.5 + 0.5 * mask_ratio)
 
-            # FIX #4: Size warmup curriculum - scale loss weight
-            size_weight = 0.3 if epoch >= 1 else 0.6  # FIX #5: Loosen warmup
-            efe_loss_val = efe_loss_val * size_weight
+        # FIX #4: Size warmup curriculum - scale loss weight
+        size_weight = 0.3 if epoch >= 1 else 0.6  # FIX #5: Loosen warmup
+        efe_loss_val = efe_loss_val * size_weight
 
-            # FIX #2: Goal-oriented loss - combine with RL reward
-            reward_tensor = torch.tensor(reward, device=device, dtype=torch.float32)
-            combined_loss = (0.7 * efe_loss_val + 0.3 * (-reward_tensor))
+        # FIX #2: Goal-oriented loss - combine with RL reward
+        reward_tensor = torch.tensor(reward, device=device, dtype=torch.float32)
+        combined_loss = (0.7 * efe_loss_val + 0.3 * (-reward_tensor))
 
         # FIX #7: Backward with scaler
         scaler.scale(combined_loss).backward()
@@ -553,7 +556,7 @@ def main(epochs=10, agent_lr=1e-5, qwen_lr=5e-5, device="cuda", seed=42,
 
     qwen = QwenHybridPrompt(
         prompt_dim=256, numeric_in_dim=15, fuse="mean",
-        qwen=QwenCfg(model_name="Qwen/Qwen2.5-1.5B", use_qwen=True)
+        qwen=QwenCfg(model_name="Qwen/Qwen2.5-1.5B", dtype="float32", use_qwen=True)
     ).to(device)
 
     agent = ARCPromptGuidedAgentGPU(
