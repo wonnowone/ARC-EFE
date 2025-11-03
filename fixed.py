@@ -348,12 +348,7 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         # FIX #7: Backward with scaler
         scaler.scale(combined_loss).backward()
 
-        # Gradient clipping before step
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(agent.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(qwen.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(solver2.parameters(), max_norm=1.0)
-
+        # Step with scaler (handles gradient clipping internally)
         scaler.step(optimizer)
         scaler.update()
 
