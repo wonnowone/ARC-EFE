@@ -274,10 +274,7 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
         raw_reward = reward
         reward = (acc_after - acc_before) * 5.0  # Scale reward signal
 
-        # ========== STEP 5: UPDATE RL AGENT ==========
-        rl_losses = policy_rl.update(rl_info, reward)
-        rl_reward = rl_losses.get("reward", 0.0)
-        rl_rewards_sum += rl_reward
+        # (RL update moved to AFTER main backward to avoid graph conflicts)
 
         # ========== STEP 6: COMPUTE EFE LOSS WITH FIXES ==========
         optimizer.zero_grad()
@@ -359,6 +356,11 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
 
         scaler.step(optimizer)
         scaler.update()
+
+        # FIX: RL update moved here (after main backward) to avoid graph conflicts
+        rl_losses = policy_rl.update(rl_info, reward)
+        rl_reward = rl_losses.get("reward", 0.0)
+        rl_rewards_sum += rl_reward
 
         epoch_loss += float(combined_loss.item())
         batches_processed += 1

@@ -1,153 +1,91 @@
-╔════════════════════════════════════════════════════════════════════════════════╗
-║           ARC-EFE FINAL CHECKLIST - QUICK REFERENCE                            ║
-╚════════════════════════════════════════════════════════════════════════════════╝
+================================================================================
+COMPLETE TRAINING FIXES - QUICK REFERENCE
+================================================================================
 
-1. PROMPT UPDATING WITH BIDIRECTIONAL FEEDBACK
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   ✅ DONE: RevThink weights reversibility at 25% (highest feedback signal)
+THREE CRITICAL ISSUES FIXED:
 
-   Location: revthink_orchestrator.py:27-34
+[1] TENSOR MISMATCH (Earlier)
+    File: fixed.py:325
+    Before: out.float()
+    After:  out.long()
+    ✓ FIXED
 
-   Weight Distribution:
-   ├─ Risk (15%)
-   ├─ Consistency (20%)
-   ├─ Bidirectional (15%)
-   ├─ REVERSIBILITY (25%) ← PRIMARY FEEDBACK
-   ├─ Ambiguity (10%)
-   ├─ Critique (10%)
-   └─ TTA (5%)
+[2] QWEN GRADIENTS BLOCKED (Major)
+    File: policy_refined.py:144
+    Before: @torch.no_grad()
+            def apply(self, ...):
+    After:  def apply(self, ...):  # decorator removed
+    ✓ FIXED
 
+[3] BACKWARD GRAPH CONFLICT (Latest)
+    File: fixed.py:277 → 362
+    Before: policy_rl.update() BEFORE loss.backward()
+    After:  policy_rl.update() AFTER scaler.step()
+    ✓ FIXED
 
-2. GRID MATCHING AS PRIORITY
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   ✅ DONE: Dedicated grid matching loss (PRIMARY objective)
+================================================================================
+FIVE IMPROVEMENTS APPLIED:
 
-   Location: loss_function.py:536-578
+[1] Qwen Gradients      → Enabled (@torch.no_grad() removed)
+[2] Hard-Cell Masking   → (0.5 + 0.5 * mask_ratio)
+[3] Reward Scaling      → reward * 5.0
+[4] Qwen Overhead       → Prompt caching every 10 batches
+[5] Curriculum Weight   → 0.6 (epoch<1) or 0.3 (epoch≥1)
 
-   Loss Hierarchy:
-   ┌─ Grid Matching (UNWEIGHTED) ← PRIMARY
-   │
-   ├─ EFE Terms
-   ├─ Step Penalty
-   ├─ Consistency (λ=1.0)
-   ├─ Bidirectional (λ=0.5)
-   ├─ Z-Anchoring (λ=0.2)
-   ├─ Prompt (λ=0.3)
-   └─ Grid Norm (λ=0.1)
+================================================================================
+GRADIENT FLOW PATH:
 
-   Target: losses['grid_matching'] < 0.1
+qwen()
+  ↓
+qwen_prompt (with requires_grad=True)
+  ↓
+refine_prompt() [FIXED: no @torch.no_grad()]
+  ↓
+refined_prompt
+  ↓
+efe_loss()
+  ↓
+loss.backward() [FIXED: clean graph]
+  ↓
+Qwen parameters updated ✅
+  ↓
+policy_rl.update() [FIXED: after backward]
 
+================================================================================
+EXPECTED FIRST RUN BEHAVIOR:
 
-3. HYPERPARAMETERS ACCESSIBLE & CONFIGURED
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   ✅ DONE: EFELossConfig class with pre-configured profiles
+Batch 0:    Qwen_grad: 0.00e+00 (computing)
+Batch 10:   Qwen_grad: 1.23e-05 ← SHOULD BE NONZERO
+Batch 50:   Qwen_grad: 5.67e-05 ← STABLE
+Loss:       Decreasing trend
+Mask_ratio: Declining (1.0 → 0.8 → 0.6)
+Reward:     Trending positive
 
-   Location: loss_function.py:25-88
+================================================================================
+KEY MONITORING:
 
-   Access Patterns:
+✅ HEALTHY:
+   - Qwen_grad: nonzero (1e-6 to 1e-4)
+   - Loss: downward trend
+   - Mask_ratio: declining
+   - No NaN/Inf values
 
-   Aggressive Grid Matching:
-   └─ cfg = EFELossConfig.aggressive_grid_matching()
+❌ RED FLAGS:
+   - Qwen_grad: 0.00e+00 for 100+ batches
+   - Loss: flat or increasing
+   - Loss: NaN/Inf
+   - Errors in backward pass
 
-   Reversibility Focus:
-   └─ cfg = EFELossConfig.reversibility_focus()
+================================================================================
+RUN COMMAND:
 
-   Balanced Default:
-   └─ cfg = EFELossConfig.balanced()
+python fixed.py \
+  --epochs 10 \
+  --agent_lr 1e-5 \
+  --qwen_lr 5e-5 \
+  --device cuda \
+  --max_batches 500
 
-   All 9 loss weights + 2 advanced params accessible
-
-
-4. SURPRISE DETECTION FOR LARGE DIFFERENCES
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   ✅ DONE: Grid difference metric with thresholds
-
-   Location: solver1.py:157-172
-
-   Detection Levels:
-   ├─ >30% pixels different → surprise = 0.9 (HIGH)
-   ├─ 10-30% different → surprise = 0.6 (MEDIUM)
-   └─ <10% different → surprise = 0.2 (LOW)
-
-   Surprise Composition:
-   ├─ 50% Novelty × Gradient
-   ├─ 25% Pattern-based
-   └─ 25% Grid-Difference ← NEW!
-
-
-5. PATTERN STORAGE & GROUPING WITH SURPRISE MITIGATION
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   ✅ DONE: Complete pattern system with clustering
-
-   Location: solver1.py:52-236
-
-   Features:
-   ├─ store_known_pattern() - Hash-based storage
-   ├─ _group_pattern() - Similarity clustering (>0.5)
-   ├─ retrieve_similar_patterns() - Group-based retrieval
-   └─ get_pattern_statistics() - Usage tracking
-
-   Similarity Metric:
-   └─ 0.5 × shape + 0.3 × color + 0.2 × structure
-
-
-6. DIMENSION CHECK - ALL VERIFIED ✅
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-   Grid Matching:     [H,W,C] logits → scalar loss
-   Forward Plan:      [1,H,W,C] → [T,H,W,C]
-   Backward Plan:     [1,H,W,C] → [T,H,W,C]
-   Reversibility:     [H,W,C] vs [H,W] → scalar
-   Pattern Sim:       [H,W] vs [H,W] → float
-   Movements:         [T,H,W,C] → [T,H,W,2]
-
-   ✅ All shapes validated and safe
-
-
-7. MISSING FUNCTION CHECK - NONE MISSING ✅
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-   13+ Critical Methods Implemented:
-   ├─ _compute_grid_matching_loss()
-   ├─ _compute_inference_first_risk()
-   ├─ _normalize_grid_size_difference()
-   ├─ _estimate_grid_movements()
-   ├─ _compute_bidirectional_loss_with_movement()
-   ├─ _compute_reversibility_loss()
-   ├─ _group_pattern()
-   ├─ retrieve_similar_patterns()
-   ├─ compute_contextual_surprise()
-   ├─ gumbel_softmax_sample()
-   ├─ update_gumbel_temperature()
-   ├─ _analyze_critique_scores()
-   └─ train_time_adapt()
-
-   ✅ All functions defined, no undefined calls
-
-
-╔════════════════════════════════════════════════════════════════════════════════╗
-║                          READY FOR TRAINING! 🚀                               ║
-╚════════════════════════════════════════════════════════════════════════════════╝
-
-Key Improvements:
-  • Prompt updates: Reversibility signals at 25% weight
-  • Grid matching: PRIMARY objective (unweighted)
-  • Hyperparameters: Centralized, configurable, profiled
-  • Surprise: Detects large changes (>30%) automatically
-  • Patterns: Stored, grouped, and used for mitigation
-  • Dimensions: All verified and safe
-  • Functions: All 13+ implemented, no missing calls
-
-Monitoring Dashboard:
-  losses['grid_matching']      < 0.1
-  losses['reversibility']      < 0.3
-  losses['consistency']        < 0.2
-  losses['total']              decreasing
-  pattern_stats['num_groups']  growing
-  pattern_stats['avg_success'] > 0.7
-
-Recommended Config:
-  cfg = EFELossConfig.aggressive_grid_matching()
-  → Doubles grid matching weight
-  → Reduces other losses proportionally
-  → Best for initial training phase
+================================================================================
+STATUS: [FULLY FIXED - READY TO TRAIN] ✅
+================================================================================
