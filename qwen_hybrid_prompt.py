@@ -223,7 +223,7 @@ class PromptCache:
 @dataclass
 class QwenCfg:
     model_name: str = "Qwen/Qwen2.5-1.5B"
-    dtype: str = "float16"      
+    dtype: str = "float32"      # FIX: Default to float32 for scaler compatibility
     max_new_tokens: int = 96
     temperature: float = 0.0        
     top_p: float = 1.0
@@ -265,7 +265,13 @@ class QwenHybridPrompt(nn.Module):
         # Lazy-load transformers
         self._has_tf = _HAS_TRANSFORMERS and self._use_qwen
         if self._has_tf:
-            dtype = torch.float16 if (qwen and qwen.dtype.lower()=="float16") else torch.bfloat16
+            # FIX: Properly map string dtype to torch dtype
+            if qwen and qwen.dtype.lower()=="float16":
+                dtype = torch.float16
+            elif qwen and qwen.dtype.lower()=="float32":
+                dtype = torch.float32
+            else:
+                dtype = torch.bfloat16  # Fallback for other dtypes
             name = qwen.model_name
             cache_dir = qwen.cache_dir
             self.tokenizer = AutoTokenizer.from_pretrained(name, cache_dir=cache_dir)
