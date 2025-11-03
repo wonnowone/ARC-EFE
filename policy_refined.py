@@ -141,7 +141,6 @@ class HumanRLAugmentor(nn.Module):
             "x": x
         }
 
-    @torch.no_grad()
     def apply(self, prompt_emb, ctrl_vec, feat_summary):
         """
         Apply refinement to get new prompt.
