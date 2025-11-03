@@ -322,7 +322,7 @@ def train_epoch_complete(agent, qwen, solver2, efe_loss, policy_rl, train_loader
             # Call EFELoss with all required inputs
             efe_losses = efe_loss(
                 forward_preds, backward_preds, state_preds, obs_probs, final_pred,
-                out.float(), episode_length=num_steps,
+                out.long(), episode_length=num_steps,
                 prompt_embedding=refined_prompt, grid_mask=grid_mask
             )
 
@@ -459,15 +459,31 @@ def evaluate_complete(agent, qwen, solver2, efe_loss, policy_rl, eval_loader, de
             qwen_pack = qwen(tr, inp, out, control_weight=0.5)
             qwen_prompt = qwen_pack["prompt_embedding"]
 
-            agent_out_init = agent.forward(inp.float().unsqueeze(0), qwen_prompt.unsqueeze(0))
-            pred_before = agent_out_init["output"].squeeze(0).argmax(dim=-1)
+            agent_out_init, _ = agent.forward(inp, qwen_prompt)
+            pred_before = agent_out_init[-1].argmax(dim=-1)
+
+            # Resize predictions to match target size if needed
+            if pred_before.shape != out.shape:
+                pred_before = torch.nn.functional.interpolate(
+                    pred_before.float().unsqueeze(0).unsqueeze(0),
+                    size=out.shape,
+                    mode='nearest'
+                ).squeeze(0).squeeze(0).long()
 
             feat_sum = torch.zeros(32, device=device)
-            ctrl_vec = agent_out_init.get("control_embedding", torch.randn(256, device=device)).squeeze(0)
-            refined_prompt, _ = policy_rl.refine_prompt(qwen_prompt.squeeze(0), ctrl_vec, feat_sum)
+            ctrl_vec = torch.randn(256, device=device)
+            refined_prompt, _ = policy_rl.refine_prompt(qwen_prompt, ctrl_vec, feat_sum)
 
-            agent_out_refined = agent.forward(inp.float().unsqueeze(0), refined_prompt.unsqueeze(0))
-            pred_after = agent_out_refined["output"].squeeze(0).argmax(dim=-1)
+            agent_out_refined, _ = agent.forward(inp, refined_prompt)
+            pred_after = agent_out_refined[-1].argmax(dim=-1)
+
+            # Resize predictions to match target size if needed
+            if pred_after.shape != out.shape:
+                pred_after = torch.nn.functional.interpolate(
+                    pred_after.float().unsqueeze(0).unsqueeze(0),
+                    size=out.shape,
+                    mode='nearest'
+                ).squeeze(0).squeeze(0).long()
 
             is_correct_after = (pred_after == out).float().mean().item() == 1.0
             if is_correct_after:

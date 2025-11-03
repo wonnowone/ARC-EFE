@@ -553,33 +553,35 @@ class EFELoss(nn.Module):
         Returns:
             matching_loss: Scalar loss (NOT weighted, high priority)
         """
+        # Ensure target is long dtype for cross-entropy (standard approach)
+        if target.dtype != torch.long:
+            # Convert float targets to long if they appear to be class indices
+            if target.dim() == 2 and target.max() <= self.num_colors:
+                target = target.long()
+            else:
+                raise ValueError(
+                    f"Target shape {target.shape} and dtype {target.dtype} incompatible with "
+                    f"final_pred shape {final_pred.shape}. Target must be [H,W] with long dtype "
+                    f"(integer class indices 0-{self.num_colors-1}) or [H,W,C] with float dtype (probabilities)."
+                )
+
         # Cross-entropy loss ensures one-to-one correspondence
-        if target.dtype == torch.long:
-            if mask is not None:
-                ignore_index = -100
-                tgt = target.clone()
-                tgt[mask == 0] = ignore_index
-                matching_loss = F.cross_entropy(
-                    final_pred.reshape(-1, final_pred.size(-1)),
-                    tgt.reshape(-1),
-                    ignore_index=ignore_index,
-                    reduction='mean'
-                )
-            else:
-                matching_loss = F.cross_entropy(
-                    final_pred.reshape(-1, final_pred.size(-1)),
-                    target.reshape(-1),
-                    reduction='mean'
-                )
+        if mask is not None:
+            ignore_index = -100
+            tgt = target.clone()
+            tgt[mask == 0] = ignore_index
+            matching_loss = F.cross_entropy(
+                final_pred.reshape(-1, final_pred.size(-1)),
+                tgt.reshape(-1),
+                ignore_index=ignore_index,
+                reduction='mean'
+            )
         else:
-            # Probability target: use KL divergence
-            logp = F.log_softmax(final_pred, dim=-1)
-            if mask is not None:
-                w = mask.float().unsqueeze(-1)
-                kl_loss = F.kl_div(logp, target, reduction='none').sum(dim=-1)
-                matching_loss = (kl_loss * mask).sum() / (mask.sum() + 1e-8)
-            else:
-                matching_loss = F.kl_div(logp, target, reduction='batchmean')
+            matching_loss = F.cross_entropy(
+                final_pred.reshape(-1, final_pred.size(-1)),
+                target.reshape(-1),
+                reduction='mean'
+            )
 
         return matching_loss
 
